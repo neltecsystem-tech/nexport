@@ -23,7 +23,7 @@ jobs:
         run: npm ci
 
       - name: Build web assets
-        run: npx expo export:web web-build
+        run: npx expo export --platform web --output-dir web-build
 
       - name: Deploy to Xserver via FTP
         uses: SamKirkland/FTP-Deploy-Action@4.0.0
