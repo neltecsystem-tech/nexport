@@ -25,6 +25,9 @@ jobs:
       - name: Build web assets
         run: npx expo export --platform web --output-dir web-build
 
+      - name: Copy service worker
+        run: cp web/sw.js web-build/sw.js
+
       - name: Verify build output
         run: ls -la web-build && find web-build | sort
 
