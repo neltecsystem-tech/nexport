@@ -181,9 +181,31 @@ export default function App() {
     return () => clearInterval(cleanup);
   }, [currentUserId]);
 
-  // グローバル通知監視: 常時接続（タブ非表示時も通知を受け取る）
+  // 通知音を再生する関数
+  const playNotificationSound = () => {
+    if (Platform.OS !== 'web') return;
+    try {
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      // チャイム音: ド→ミ→ソの和音風
+      const notes = [523.25, 659.25, 783.99]; // C5, E5, G5
+      notes.forEach((freq, i) => {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.15, audioCtx.currentTime + i * 0.12);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + i * 0.12 + 0.5);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(audioCtx.currentTime + i * 0.12);
+        osc.stop(audioCtx.currentTime + i * 0.12 + 0.5);
+      });
+    } catch (_) {}
+  };
+
+  // グローバル通知監視: 常時接続（フォアグラウンド時は通知音、バックグラウンド時はポップアップ通知）
   useEffect(() => {
-    if (!currentUserId || Platform.OS !== 'web' || !('Notification' in window) || Notification.permission !== 'granted') return;
+    if (!currentUserId || Platform.OS !== 'web') return;
 
     const notifChannel = supabase
       .channel('global-notif')
@@ -191,28 +213,41 @@ export default function App() {
         async (payload) => {
           const msg = payload.new as any;
           if (msg.sender_id === currentUserId) return;
-          // タブがアクティブならチャット画面で表示されるので通知不要
-          if (document.visibilityState === 'visible') return;
           const { data: mem } = await supabase.from('channel_members').select('user_id').eq('channel_id', msg.channel_id).eq('user_id', currentUserId).maybeSingle();
           if (!mem) return;
-          const { data: prof } = await supabase.from('profiles').select('display_name').eq('id', msg.sender_id).single();
-          const { data: ch } = await supabase.from('channels').select('name').eq('id', msg.channel_id).single();
-          new Notification(`#${ch?.name ?? 'チャンネル'}`, {
-            body: `${prof?.display_name ?? ''}: ${(msg.content ?? '').slice(0, 100)}`,
-            icon: '/favicon.ico',
-          });
+          // フォアグラウンド: 通知音を鳴らす
+          if (document.visibilityState === 'visible') {
+            playNotificationSound();
+            return;
+          }
+          // バックグラウンド: ポップアップ通知
+          if ('Notification' in window && Notification.permission === 'granted') {
+            const { data: prof } = await supabase.from('profiles').select('display_name').eq('id', msg.sender_id).single();
+            const { data: ch } = await supabase.from('channels').select('name').eq('id', msg.channel_id).single();
+            new Notification(`#${ch?.name ?? 'チャンネル'}`, {
+              body: `${prof?.display_name ?? ''}: ${(msg.content ?? '').slice(0, 100)}`,
+              icon: '/favicon.ico',
+            });
+          }
         }
       )
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'direct_messages' },
         async (payload) => {
           const dm = payload.new as any;
           if (dm.sender_id === currentUserId || dm.receiver_id !== currentUserId) return;
-          if (document.visibilityState === 'visible') return;
-          const { data: prof } = await supabase.from('profiles').select('display_name').eq('id', dm.sender_id).single();
-          new Notification('💬 DM', {
-            body: `${prof?.display_name ?? ''}: ${(dm.content ?? '').slice(0, 100)}`,
-            icon: '/favicon.ico',
-          });
+          // フォアグラウンド: 通知音を鳴らす
+          if (document.visibilityState === 'visible') {
+            playNotificationSound();
+            return;
+          }
+          // バックグラウンド: ポップアップ通知
+          if ('Notification' in window && Notification.permission === 'granted') {
+            const { data: prof } = await supabase.from('profiles').select('display_name').eq('id', dm.sender_id).single();
+            new Notification('💬 DM', {
+              body: `${prof?.display_name ?? ''}: ${(dm.content ?? '').slice(0, 100)}`,
+              icon: '/favicon.ico',
+            });
+          }
         }
       )
       .subscribe();
