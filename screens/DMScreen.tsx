@@ -22,9 +22,10 @@ type Props = {
   partnerId: string;
   partnerName: string;
   currentUserId: string;
+  onStartCall?: () => void;
 };
 
-export default function DMChatScreen({ onBack, partnerId, partnerName, currentUserId }: Props) {
+export default function DMChatScreen({ onBack, partnerId, partnerName, currentUserId, onStartCall }: Props) {
   const [messages, setMessages] = useState<DM[]>([]);
   const [inputText, setInputText] = useState('');
   const [uploading, setUploading] = useState(false);
@@ -162,7 +163,9 @@ export default function DMChatScreen({ onBack, partnerId, partnerName, currentUs
           </View>
           <Text style={styles.headerName}>{partnerName}</Text>
         </View>
-        <View style={{ width: 60 }} />
+        <TouchableOpacity onPress={onStartCall} style={{ width: 60, alignItems: 'center', justifyContent: 'center' }}>
+          <Text style={{ fontSize: 22 }}>📞</Text>
+        </TouchableOpacity>
       </View>
 
       <FlatList

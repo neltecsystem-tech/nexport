@@ -41,6 +41,8 @@ import NotificationSettingsScreen from './screens/NotificationSettingsScreen';
 import ChannelTabScreen from './screens/ChannelTabScreen';
 import PendingApprovalScreen from './screens/PendingApprovalScreen';
 import BusinessScreen from './screens/BusinessScreen';
+import VoiceCallScreen from './screens/VoiceCallScreen';
+import { useVoiceCall } from './lib/useVoiceCall';
 
 type Channel = { id: string; name: string };
 type Screen = 'channels' | 'chat' | 'channel_tabs' | 'members' | 'dm' | 'search' | 'profile' | 'admin' | 'schedule' | 'business' | 'notifications';
@@ -55,6 +57,7 @@ export default function App() {
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [accountStatus, setAccountStatus] = useState<string | null>(null);
   const [employmentType, setEmploymentType] = useState<string | null>(null);
+  const voiceCall = useVoiceCall(currentUserId);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -137,7 +140,7 @@ export default function App() {
       if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
       // 通知チャンネル以外のRealtimeを切断（バッテリー節約）
       supabase.getChannels().forEach(ch => {
-        if (!ch.topic.includes('global-notif')) {
+        if (!ch.topic.includes('global-notif') && !ch.topic.includes('voice-')) {
           supabase.removeChannel(ch);
         }
       });
@@ -302,6 +305,22 @@ export default function App() {
     setEmploymentType(null);
   };
 
+  // 通話オーバーレイ（全画面の上に表示）
+  const voiceCallOverlay = voiceCall.callState !== 'idle' ? (
+    <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9999 }}>
+      <VoiceCallScreen
+        callState={voiceCall.callState}
+        remoteUserName={voiceCall.remoteUserName ?? '不明'}
+        isMuted={voiceCall.isMuted}
+        callDuration={voiceCall.callDuration}
+        onAnswer={voiceCall.answerCall}
+        onReject={voiceCall.rejectCall}
+        onHangUp={voiceCall.hangUp}
+        onToggleMute={voiceCall.toggleMute}
+      />
+    </View>
+  ) : null;
+
   if (!session) return <AuthScreen />;
 
   // Safety net: if user has a session but account is not yet approved
@@ -309,23 +328,31 @@ export default function App() {
     return <PendingApprovalScreen onLogout={handleLogout} />;
   }
 
+  // ラッパー: 全画面に通話オーバーレイを重ねる
+  const withCallOverlay = (screen: React.ReactElement) => (
+    <View style={{ flex: 1 }}>
+      {screen}
+      {voiceCallOverlay}
+    </View>
+  );
+
   if (currentScreen === 'business') {
-    return <BusinessScreen onBack={() => setCurrentScreen('channels')} currentUserId={currentUserId} isAdmin={isAdmin} />;
+    return withCallOverlay(<BusinessScreen onBack={() => setCurrentScreen('channels')} currentUserId={currentUserId} isAdmin={isAdmin} />);
   }
   if (currentScreen === 'admin' && isAdmin) {
-    return <AdminScreen onBack={() => setCurrentScreen('channels')} currentUserId={currentUserId} isSuperAdmin={isSuperAdmin} />;
+    return withCallOverlay(<AdminScreen onBack={() => setCurrentScreen('channels')} currentUserId={currentUserId} isSuperAdmin={isSuperAdmin} />);
   }
-  if (currentScreen === 'profile') return <ProfileScreen onBack={() => setCurrentScreen('channels')} />;
-  if (currentScreen === 'notifications') return <NotificationSettingsScreen onBack={() => setCurrentScreen('channels')} />;
-  if (currentScreen === 'schedule') return <ScheduleScreen onBack={() => setCurrentScreen('channels')} currentUserId={currentUserId} />;
+  if (currentScreen === 'profile') return withCallOverlay(<ProfileScreen onBack={() => setCurrentScreen('channels')} />);
+  if (currentScreen === 'notifications') return withCallOverlay(<NotificationSettingsScreen onBack={() => setCurrentScreen('channels')} />);
+  if (currentScreen === 'schedule') return withCallOverlay(<ScheduleScreen onBack={() => setCurrentScreen('channels')} currentUserId={currentUserId} />);
   if (currentScreen === 'search') {
-    return <SearchScreen onBack={() => setCurrentScreen('channels')} onSelectChannel={(id, name) => { setCurrentChannel({ id, name }); setCurrentScreen('chat'); }} />;
+    return withCallOverlay(<SearchScreen onBack={() => setCurrentScreen('channels')} onSelectChannel={(id, name) => { setCurrentChannel({ id, name }); setCurrentScreen('chat'); }} />);
   }
   if (currentScreen === 'dm' && dmPartner && currentUserId) {
-    return <DMScreen onBack={() => setCurrentScreen('members')} partnerId={dmPartner.id} partnerName={dmPartner.name} currentUserId={currentUserId} />;
+    return withCallOverlay(<DMScreen onBack={() => setCurrentScreen('members')} partnerId={dmPartner.id} partnerName={dmPartner.name} currentUserId={currentUserId} onStartCall={() => voiceCall.startCall(dmPartner.id, dmPartner.name)} />);
   }
   if (currentScreen === 'members') {
-    return (
+    return withCallOverlay(
       <MemberListScreen
         onBack={() => setCurrentScreen('channels')}
         onStartDM={(partnerId, partnerName) => { setDmPartner({ id: partnerId, name: partnerName }); setCurrentScreen('dm'); }}
@@ -334,7 +361,7 @@ export default function App() {
     );
   }
   if (currentScreen === 'channel_tabs' && currentChannel) {
-    return (
+    return withCallOverlay(
       <ChannelTabScreen
         channelId={currentChannel.id}
         channelName={currentChannel.name}
@@ -345,7 +372,7 @@ export default function App() {
     );
   }
   if (currentScreen === 'chat' && currentChannel) {
-    return (
+    return withCallOverlay(
       <ChatScreen
         channelId={currentChannel.id}
         channelName={currentChannel.name}
@@ -356,7 +383,7 @@ export default function App() {
     );
   }
 
-  return (
+  return withCallOverlay(
     <ChannelListScreen
       onSelectChannel={(channel) => { setCurrentChannel({ id: channel.id, name: channel.name }); setCurrentScreen('chat'); }}
       onShowMembers={() => setCurrentScreen('members')}
