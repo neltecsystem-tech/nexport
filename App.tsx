@@ -203,9 +203,32 @@ export default function App() {
     } catch (_) {}
   };
 
+  // PWAアイコンバッジ更新（LINEのような未読数表示）
+  const updateAppBadge = (count: number) => {
+    if (Platform.OS !== 'web') return;
+    try {
+      if ('setAppBadge' in navigator) {
+        if (count > 0) (navigator as any).setAppBadge(count);
+        else (navigator as any).clearAppBadge();
+      }
+    } catch (_) {}
+  };
+
+  // 未読バッジカウンター
+  const unreadBadgeRef = React.useRef(0);
+
   // グローバル通知監視: 常時接続（フォアグラウンド時は通知音、バックグラウンド時はポップアップ通知）
   useEffect(() => {
     if (!currentUserId || Platform.OS !== 'web') return;
+
+    // タブがアクティブになったらバッジをリセット
+    const handleVisibilityForBadge = () => {
+      if (document.visibilityState === 'visible') {
+        unreadBadgeRef.current = 0;
+        updateAppBadge(0);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityForBadge);
 
     const notifChannel = supabase
       .channel('global-notif')
@@ -220,7 +243,9 @@ export default function App() {
             playNotificationSound();
             return;
           }
-          // バックグラウンド: ポップアップ通知
+          // バックグラウンド: バッジ更新 + ポップアップ通知
+          unreadBadgeRef.current++;
+          updateAppBadge(unreadBadgeRef.current);
           if ('Notification' in window && Notification.permission === 'granted') {
             const { data: prof } = await supabase.from('profiles').select('display_name').eq('id', msg.sender_id).single();
             const { data: ch } = await supabase.from('channels').select('name').eq('id', msg.channel_id).single();
@@ -240,7 +265,9 @@ export default function App() {
             playNotificationSound();
             return;
           }
-          // バックグラウンド: ポップアップ通知
+          // バックグラウンド: バッジ更新 + ポップアップ通知
+          unreadBadgeRef.current++;
+          updateAppBadge(unreadBadgeRef.current);
           if ('Notification' in window && Notification.permission === 'granted') {
             const { data: prof } = await supabase.from('profiles').select('display_name').eq('id', dm.sender_id).single();
             new Notification('💬 DM', {
@@ -252,7 +279,10 @@ export default function App() {
       )
       .subscribe();
 
-    return () => { supabase.removeChannel(notifChannel); };
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityForBadge);
+      supabase.removeChannel(notifChannel);
+    };
   }, [currentUserId]);
 
   const updateOnlineStatus = async (userId: string, status: string) => {
