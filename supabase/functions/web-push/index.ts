@@ -64,6 +64,16 @@ async function createVapidJwt(audience: string): Promise<string> {
 }
 
 async function sendExpoPush(token: string, payloadObj: any) {
+  const body: any = {
+    to: token,
+    title: payloadObj.title || 'NexPort',
+    body: payloadObj.body || '',
+    data: { url: payloadObj.url || '/' },
+    sound: 'default',
+    priority: 'high',
+    channelId: 'default',
+  };
+  if (typeof payloadObj.badge === 'number') body.badge = payloadObj.badge;
   const resp = await fetch('https://exp.host/--/api/v2/push/send', {
     method: 'POST',
     headers: {
@@ -71,15 +81,7 @@ async function sendExpoPush(token: string, payloadObj: any) {
       'Accept': 'application/json',
       'Accept-Encoding': 'gzip, deflate',
     },
-    body: JSON.stringify({
-      to: token,
-      title: payloadObj.title || 'NexPort',
-      body: payloadObj.body || '',
-      data: { url: payloadObj.url || '/' },
-      sound: 'default',
-      priority: 'high',
-      channelId: 'default',
-    }),
+    body: JSON.stringify(body),
   });
   if (!resp.ok) {
     const errText = await resp.text();
@@ -135,14 +137,16 @@ Deno.serve(async (req) => {
     });
 
     // サブスクリプション登録
+    // Schema: id, user_id, endpoint, p256dh, auth, created_at
     if (action === 'subscribe') {
       if (!user_id || !subscription) throw new Error('user_id and subscription required');
-      // upsert
-      await supabaseAdmin.from('push_subscriptions').upsert({
-        user_id, endpoint: subscription.endpoint, subscription: JSON.stringify(subscription),
-        updated_at: new Date().toISOString(),
-      }, { onConflict: 'endpoint' });
-      return new Response(JSON.stringify({ success: true }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      const isExpo = subscription?.type === 'expo' && subscription?.token;
+      const row = isExpo
+        ? { user_id, endpoint: subscription.endpoint, p256dh: '', auth: '' }
+        : { user_id, endpoint: subscription.endpoint, p256dh: subscription.keys?.p256dh || '', auth: subscription.keys?.auth || '' };
+      const { error } = await supabaseAdmin.from('push_subscriptions').upsert(row, { onConflict: 'endpoint' });
+      if (error) throw new Error('DB upsert failed: ' + error.message);
+      return new Response(JSON.stringify({ success: true, type: isExpo ? 'expo' : 'webpush' }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
     // プッシュ送信
@@ -151,22 +155,30 @@ Deno.serve(async (req) => {
       if (!targetIds.length) throw new Error('user_id or user_ids required');
 
       const { data: subs } = await supabaseAdmin.from('push_subscriptions').select('*').in('user_id', targetIds);
-      const payload = JSON.stringify({ title: title || 'NexPort', body: body || '', url: url || '/', tag: 'nexport-' + Date.now() });
+      const payloadObj = { title: title || 'NexPort', body: body || '', url: url || '/', tag: 'nexport-' + Date.now() };
+      const payloadStr = JSON.stringify(payloadObj);
 
       let sent = 0, failed = 0;
+      const errors: string[] = [];
       for (const sub of (subs || [])) {
         try {
-          await sendPush(JSON.parse(sub.subscription), payload);
+          if (typeof sub.endpoint === 'string' && sub.endpoint.startsWith('expo:')) {
+            const token = sub.endpoint.slice(5);
+            await sendExpoPush(token, payloadObj);
+          } else {
+            const reconstructed = { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } };
+            await sendPush(reconstructed, payloadStr);
+          }
           sent++;
         } catch (e: any) {
           failed++;
-          // Remove invalid subscriptions
-          if (e.message.includes('410') || e.message.includes('404')) {
+          errors.push((e?.message || 'unknown').slice(0, 200));
+          if (e?.message?.includes('410') || e?.message?.includes('404') || e?.message?.includes('DeviceNotRegistered')) {
             await supabaseAdmin.from('push_subscriptions').delete().eq('endpoint', sub.endpoint);
           }
         }
       }
-      return new Response(JSON.stringify({ success: true, sent, failed }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      return new Response(JSON.stringify({ success: true, sent, failed, errors: errors.slice(0, 5) }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
     return new Response(JSON.stringify({ error: 'Unknown action' }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

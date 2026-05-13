@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Platform, View, Text, TouchableOpacity } from 'react-native';
+import { Platform, View, Text, TouchableOpacity, AppState } from 'react-native';
 import { Session } from '@supabase/supabase-js';
 import { supabase } from './lib/supabase';
 import * as Notifications from 'expo-notifications';
@@ -264,19 +264,47 @@ export default function App() {
     } catch (_) {}
   };
 
-  // PWAアイコンバッジ更新（LINEのような未読数表示）
+  // アプリアイコンバッジ更新（Web PWA + ネイティブ両対応）
   const updateAppBadge = (count: number) => {
-    if (Platform.OS !== 'web') return;
-    try {
-      if ('setAppBadge' in navigator) {
-        if (count > 0) (navigator as any).setAppBadge(count);
-        else (navigator as any).clearAppBadge();
-      }
-    } catch (_) {}
+    if (Platform.OS === 'web') {
+      try {
+        if ('setAppBadge' in navigator) {
+          if (count > 0) (navigator as any).setAppBadge(count);
+          else (navigator as any).clearAppBadge();
+        }
+      } catch (_) {}
+    } else {
+      // Native (Android/iOS): expo-notifications でバッジ設定
+      Notifications.setBadgeCountAsync(Math.max(0, count)).catch(() => {});
+    }
   };
 
   // 未読バッジカウンター
   const unreadBadgeRef = React.useRef(0);
+
+  // ネイティブ: AppState でフォアグラウンド復帰時にバッジリセット
+  useEffect(() => {
+    if (!currentUserId || Platform.OS === 'web') return;
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        unreadBadgeRef.current = 0;
+        updateAppBadge(0);
+      }
+    });
+    return () => sub.remove();
+  }, [currentUserId]);
+
+  // ネイティブ: 受信した push 通知でバッジカウントを進める (フォアグラウンド時はnoop)
+  useEffect(() => {
+    if (!currentUserId || Platform.OS === 'web') return;
+    const recvSub = Notifications.addNotificationReceivedListener(() => {
+      if (AppState.currentState !== 'active') {
+        unreadBadgeRef.current++;
+        updateAppBadge(unreadBadgeRef.current);
+      }
+    });
+    return () => recvSub.remove();
+  }, [currentUserId]);
 
   // グローバル通知監視: 常時接続（フォアグラウンド時は通知音、バックグラウンド時はポップアップ通知）
   useEffect(() => {
