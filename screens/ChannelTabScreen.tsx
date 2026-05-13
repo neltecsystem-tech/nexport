@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import { supabase } from '../lib/supabase';
+import { confirmDialog } from '../lib/platformHelpers';
 
 type Tab = 'notes' | 'announcements' | 'files';
 
@@ -142,14 +143,14 @@ export default function ChannelTabScreen({ channelId, channelName, onBack, isAdm
   };
 
   const deleteNote = async (note: Note) => {
-    if (!window.confirm(`「${note.title}」を削除しますか？`)) return;
+    if (!await confirmDialog(`「${note.title}」を削除しますか？`)) return;
     await supabase.from('channel_notes').delete().eq('id', note.id);
     setModalVisible(false);
     fetchNotes();
   };
 
   const deleteAnnouncement = async (ann: Announcement) => {
-    if (!window.confirm(`「${ann.title}」を削除しますか？`)) return;
+    if (!await confirmDialog(`「${ann.title}」を削除しますか？`)) return;
     await supabase.from('channel_announcements').delete().eq('id', ann.id);
     setModalVisible(false);
     fetchAnnouncements();
@@ -157,7 +158,7 @@ export default function ChannelTabScreen({ channelId, channelName, onBack, isAdm
 
   const deleteFile = async (file: ChannelFile) => {
     if (file.user_id !== currentUserId && !isAdmin) { alert('自分がアップロードしたファイルのみ削除できます'); return; }
-    if (!window.confirm(`「${file.file_name}」を削除しますか？`)) return;
+    if (!await confirmDialog(`「${file.file_name}」を削除しますか？`)) return;
     await supabase.from('channel_files').delete().eq('id', file.id);
     fetchFiles();
   };

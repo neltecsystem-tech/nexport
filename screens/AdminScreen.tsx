@@ -4,8 +4,9 @@ import {
   StyleSheet, Alert, Modal, ScrollView, Image, TextInput,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
+import { confirmDialog } from '../lib/platformHelpers';
 
-type Tab = 'chat_logs' | 'members' | 'pending' | 'admin_settings';
+type Tab = 'chat_logs' | 'dm_logs' | 'call_logs' | 'members' | 'pending' | 'admin_settings';
 
 type Message = {
   id: string;
@@ -157,14 +158,47 @@ export default function AdminScreen({ onBack, currentUserId, isSuperAdmin }: Pro
   const [editPerms, setEditPerms] = useState<string[]>([]);
   const [savingPerms, setSavingPerms] = useState(false);
 
-  useEffect(() => { fetchChannels(); }, []);
+  useEffect(() => { fetchChannels(); fetchMembers(); }, []);
+
+  // DM logs
+  const [dmLogs, setDmLogs] = useState<any[]>([]);
+  const [dmLoading, setDmLoading] = useState(false);
+  const [dmUserFilter, setDmUserFilter] = useState('');
+
+  // Call logs
+  const [callLogs, setCallLogs] = useState<any[]>([]);
+  const [callLoading, setCallLoading] = useState(false);
 
   useEffect(() => {
     if (tab === 'chat_logs') { setPage(0); setMessages([]); fetchMessages(0); }
+    if (tab === 'dm_logs') fetchDmLogs();
+    if (tab === 'call_logs') fetchCallLogs();
     if (tab === 'members') fetchMembers();
     if (tab === 'pending') fetchPendingMembers();
     if (tab === 'admin_settings') fetchAdminList();
   }, [tab, selectedChannel, dateRange]);
+
+  const fetchDmLogs = async () => {
+    setDmLoading(true);
+    const { data } = await supabase
+      .from('direct_messages')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(100);
+    setDmLogs(data ?? []);
+    setDmLoading(false);
+  };
+
+  const fetchCallLogs = async () => {
+    setCallLoading(true);
+    const { data } = await supabase
+      .from('call_logs')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(100);
+    setCallLogs(data ?? []);
+    setCallLoading(false);
+  };
 
   const fetchAdminList = async () => {
     setLoadingAdmins(true);
@@ -187,7 +221,7 @@ export default function AdminScreen({ onBack, currentUserId, isSuperAdmin }: Pro
 
   const demoteToMember = async (admin: AdminMember) => {
     if (!isSuperAdmin) return;
-    if (!window.confirm(`${admin.display_name} を一般メンバーに降格しますか？`)) return;
+    if (!await confirmDialog(`${admin.display_name} を一般メンバーに降格しますか？`)) return;
     try {
       await callAdminApi('set_role', { user_id: admin.id, role: 'member' });
       await logAdminAction('change_role', 'member', admin.id, `${admin.display_name}: ${admin.role} → member`);
@@ -199,7 +233,7 @@ export default function AdminScreen({ onBack, currentUserId, isSuperAdmin }: Pro
 
   const promoteToSuperAdmin = async (admin: AdminMember) => {
     if (!isSuperAdmin) return;
-    if (!window.confirm(`${admin.display_name} を最高管理者に昇格しますか？\n自分の最高管理者権限は失われます。`)) return;
+    if (!await confirmDialog(`${admin.display_name} を最高管理者に昇格しますか？\n自分の最高管理者権限は失われます。`)) return;
     try {
       await callAdminApi('set_role', { user_id: currentUserId!, role: 'member' });
       await callAdminApi('promote_super_admin', { user_id: admin.id });
@@ -281,7 +315,7 @@ export default function AdminScreen({ onBack, currentUserId, isSuperAdmin }: Pro
   };
 
   const rejectUser = async (member: PendingMember) => {
-    if (!window.confirm(`${member.display_name} を拒否してアカウントを削除しますか？`)) return;
+    if (!await confirmDialog(`${member.display_name} を拒否してアカウントを削除しますか？`)) return;
     try {
       await callAdminApi('reject_user', { user_id: member.id });
       await logAdminAction('reject_user', 'member', member.id, member.display_name);
@@ -495,7 +529,7 @@ export default function AdminScreen({ onBack, currentUserId, isSuperAdmin }: Pro
   };
 
   const deleteMember = async (member: Member) => {
-    if (!window.confirm(`${member.display_name} を完全に削除しますか？\nこの操作は取り消せません。`)) return;
+    if (!await confirmDialog(`${member.display_name} を完全に削除しますか？\nこの操作は取り消せません。`)) return;
     try {
       await callAdminApi('delete_user', { user_id: member.id });
       await logAdminAction('delete_member', 'member', member.id, member.display_name);
@@ -506,7 +540,7 @@ export default function AdminScreen({ onBack, currentUserId, isSuperAdmin }: Pro
   };
 
   const deleteMessage = async (msg: Message) => {
-    if (!window.confirm(`「${msg.content.slice(0, 40)}」を削除しますか？`)) return;
+    if (!await confirmDialog(`「${msg.content.slice(0, 40)}」を削除しますか？`)) return;
     const { error } = await supabase.from('messages').delete().eq('id', msg.id);
     if (error) { alert('エラー: ' + error.message); return; }
     await logAdminAction('delete_message', 'message', msg.id, msg.content.slice(0, 100));
@@ -521,7 +555,6 @@ export default function AdminScreen({ onBack, currentUserId, isSuperAdmin }: Pro
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'online': return '#06C755';
-      case 'away': return '#FFA500';
       default: return '#999';
     }
   };
@@ -583,8 +616,14 @@ export default function AdminScreen({ onBack, currentUserId, isSuperAdmin }: Pro
         <TouchableOpacity style={[styles.tab, tab === 'chat_logs' && styles.tabActive]} onPress={() => setTab('chat_logs')}>
           <Text style={[styles.tabText, tab === 'chat_logs' && styles.tabTextActive]}>💬 チャットログ</Text>
         </TouchableOpacity>
+        <TouchableOpacity style={[styles.tab, tab === 'dm_logs' && styles.tabActive]} onPress={() => setTab('dm_logs')}>
+          <Text style={[styles.tabText, tab === 'dm_logs' && styles.tabTextActive]}>✉️ DM</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={[styles.tab, tab === 'call_logs' && styles.tabActive]} onPress={() => setTab('call_logs')}>
+          <Text style={[styles.tabText, tab === 'call_logs' && styles.tabTextActive]}>📞 通話</Text>
+        </TouchableOpacity>
         <TouchableOpacity style={[styles.tab, tab === 'members' && styles.tabActive]} onPress={() => setTab('members')}>
-          <Text style={[styles.tabText, tab === 'members' && styles.tabTextActive]}>👥 メンバー管理</Text>
+          <Text style={[styles.tabText, tab === 'members' && styles.tabTextActive]}>👥 メンバー</Text>
         </TouchableOpacity>
         <TouchableOpacity style={[styles.tab, tab === 'pending' && styles.tabActive]} onPress={() => setTab('pending')}>
           <View style={styles.tabWithBadge}>
@@ -647,6 +686,72 @@ export default function AdminScreen({ onBack, currentUserId, isSuperAdmin }: Pro
               ) : messages.length > 0 ? <Text style={styles.noMoreText}>すべてのログを表示しました</Text> : null
             }
           />
+        </View>
+      )}
+
+      {/* DMログタブ */}
+      {tab === 'dm_logs' && (
+        <View style={{ flex: 1 }}>
+          <TextInput
+            style={{ backgroundColor: '#F1F5F9', borderRadius: 8, padding: 10, margin: 12, fontSize: 14 }}
+            placeholder="ユーザーIDで絞り込み" value={dmUserFilter} onChangeText={setDmUserFilter}
+            placeholderTextColor="#94A3B8"
+          />
+          {dmLoading ? <Text style={{ textAlign: 'center', marginTop: 20, color: '#94A3B8' }}>読み込み中...</Text> : (
+            <FlatList
+              data={dmUserFilter ? dmLogs.filter(d => d.sender_id?.includes(dmUserFilter) || d.receiver_id?.includes(dmUserFilter)) : dmLogs}
+              keyExtractor={item => item.id}
+              contentContainerStyle={{ padding: 12, paddingBottom: 40 }}
+              ListEmptyComponent={<Text style={{ textAlign: 'center', marginTop: 40, color: '#94A3B8' }}>DMログがありません</Text>}
+              renderItem={({ item: dm }) => {
+                const senderName = members.find(m => m.id === dm.sender_id)?.display_name || dm.sender_id?.slice(0, 8);
+                const receiverName = members.find(m => m.id === dm.receiver_id)?.display_name || dm.receiver_id?.slice(0, 8);
+                return (
+                  <View style={{ backgroundColor: '#fff', borderRadius: 10, padding: 12, marginBottom: 8, borderLeftWidth: 3, borderLeftColor: '#8B5CF6' }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#1E293B' }}>{senderName} → {receiverName}</Text>
+                      <Text style={{ fontSize: 11, color: '#94A3B8' }}>{new Date(dm.created_at).toLocaleString('ja-JP')}</Text>
+                    </View>
+                    <Text style={{ fontSize: 13, color: '#475569' }} numberOfLines={3}>{dm.content || (dm.file_url ? '📎 ファイル' : '')}</Text>
+                    {dm.file_type && <Text style={{ fontSize: 11, color: '#94A3B8', marginTop: 2 }}>📎 {dm.file_type}</Text>}
+                  </View>
+                );
+              }}
+            />
+          )}
+        </View>
+      )}
+
+      {/* 通話ログタブ */}
+      {tab === 'call_logs' && (
+        <View style={{ flex: 1 }}>
+          {callLoading ? <Text style={{ textAlign: 'center', marginTop: 20, color: '#94A3B8' }}>読み込み中...</Text> : (
+            <FlatList
+              data={callLogs}
+              keyExtractor={item => item.id}
+              contentContainerStyle={{ padding: 12, paddingBottom: 40 }}
+              ListEmptyComponent={<Text style={{ textAlign: 'center', marginTop: 40, color: '#94A3B8' }}>通話ログがありません</Text>}
+              renderItem={({ item: cl }) => {
+                const callerName = members.find(m => m.id === cl.caller_id)?.display_name || cl.caller_id?.slice(0, 8);
+                const calleeName = members.find(m => m.id === cl.callee_id)?.display_name || cl.callee_id?.slice(0, 8);
+                const statusLabel = cl.status === 'completed' ? '✅ 通話完了' : cl.status === 'rejected' ? '❌ 拒否' : cl.status === 'connected' ? '🔄 通話中' : '📵 不在着信';
+                const statusColor = cl.status === 'completed' ? '#22C55E' : cl.status === 'rejected' ? '#EF4444' : cl.status === 'connected' ? '#3B82F6' : '#94A3B8';
+                const duration = cl.duration_seconds > 0 ? `${Math.floor(cl.duration_seconds / 60)}:${(cl.duration_seconds % 60).toString().padStart(2, '0')}` : '';
+                return (
+                  <View style={{ backgroundColor: '#fff', borderRadius: 10, padding: 12, marginBottom: 8, borderLeftWidth: 3, borderLeftColor: statusColor }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#1E293B' }}>📞 {callerName} → {calleeName}</Text>
+                      <Text style={{ fontSize: 11, color: '#94A3B8' }}>{new Date(cl.created_at).toLocaleString('ja-JP')}</Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Text style={{ fontSize: 12, color: statusColor, fontWeight: '600' }}>{statusLabel}</Text>
+                      {duration ? <Text style={{ fontSize: 12, color: '#64748B' }}>⏱ {duration}</Text> : null}
+                    </View>
+                  </View>
+                );
+              }}
+            />
+          )}
         </View>
       )}
 

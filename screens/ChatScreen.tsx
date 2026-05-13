@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '../lib/supabase';
+import { confirmDialog } from '../lib/platformHelpers';
 
 type Message = {
   id: string;
@@ -92,6 +93,20 @@ export default function ChatScreen({ channelId, channelName, onBack, onOpenTabs,
   const [mentionMembers, setMentionMembers] = useState<{ user_id: string; display_name: string }[]>([]);
   // Channel notification settings
   const [chNotifMuted, setChNotifMuted] = useState(false);
+  // Poll (アンケート)
+  const [pollModalVisible, setPollModalVisible] = useState(false);
+  const [pollQuestion, setPollQuestion] = useState('');
+  const [pollOptions, setPollOptions] = useState(['', '']);
+  const [pollAnonymous, setPollAnonymous] = useState(false);
+  const [pollMultiple, setPollMultiple] = useState(false);
+  const [polls, setPolls] = useState<any[]>([]);
+  const [pollVotes, setPollVotes] = useState<Record<string, any[]>>({});
+  // Safety check (安否確認)
+  const [safetyModalVisible, setSafetyModalVisible] = useState(false);
+  const [safetyTitle, setSafetyTitle] = useState('');
+  const [safetyDesc, setSafetyDesc] = useState('');
+  const [safetyChecks, setSafetyChecks] = useState<any[]>([]);
+  const [safetyResponses, setSafetyResponses] = useState<Record<string, any[]>>({});
   const [chNotifMentionOnly, setChNotifMentionOnly] = useState(false);
   const [chNotifModalVisible, setChNotifModalVisible] = useState(false);
 
@@ -344,7 +359,7 @@ export default function ChatScreen({ channelId, channelName, onBack, onOpenTabs,
   };
 
   const deleteRmItem = async (item: RichMenuItem) => {
-    if (!window.confirm(`「${item.label}」を削除しますか？`)) return;
+    if (!await confirmDialog(`「${item.label}」を削除しますか？`)) return;
     await supabase.from('channel_rich_menus').delete().eq('id', item.id);
     await fetchRichMenu();
   };
@@ -389,6 +404,92 @@ export default function ChatScreen({ channelId, channelName, onBack, onOpenTabs,
     setShowMentionList(false);
   };
 
+  // ── Poll functions ──
+  const fetchPolls = useCallback(async () => {
+    const { data } = await supabase.from('polls').select('*').eq('channel_id', channelId).order('created_at', { ascending: false });
+    if (data) {
+      setPolls(data);
+      const votesMap: Record<string, any[]> = {};
+      for (const p of data) {
+        const { data: votes } = await supabase.from('poll_votes').select('*').eq('poll_id', p.id);
+        votesMap[p.id] = votes ?? [];
+      }
+      setPollVotes(votesMap);
+    }
+  }, [channelId]);
+
+  useEffect(() => { fetchPolls(); }, [fetchPolls]);
+
+  const createPoll = async () => {
+    if (!pollQuestion.trim() || pollOptions.filter(o => o.trim()).length < 2) {
+      alert('質問と2つ以上の選択肢が必要です'); return;
+    }
+    await supabase.from('polls').insert({
+      channel_id: channelId, creator_id: userIdRef.current,
+      question: pollQuestion.trim(),
+      options: pollOptions.filter(o => o.trim()),
+      is_anonymous: pollAnonymous, is_multiple: pollMultiple,
+    });
+    setPollModalVisible(false);
+    setPollQuestion(''); setPollOptions(['', '']); setPollAnonymous(false); setPollMultiple(false);
+    fetchPolls();
+  };
+
+  const votePoll = async (pollId: string, optionIndex: number) => {
+    if (!userIdRef.current) return;
+    const existing = (pollVotes[pollId] ?? []).filter(v => v.user_id === userIdRef.current);
+    const poll = polls.find(p => p.id === pollId);
+    const alreadyVoted = existing.some(v => v.option_index === optionIndex);
+    if (alreadyVoted) {
+      await supabase.from('poll_votes').delete().eq('poll_id', pollId).eq('user_id', userIdRef.current).eq('option_index', optionIndex);
+    } else {
+      if (!poll?.is_multiple) {
+        await supabase.from('poll_votes').delete().eq('poll_id', pollId).eq('user_id', userIdRef.current);
+      }
+      await supabase.from('poll_votes').insert({ poll_id: pollId, user_id: userIdRef.current, option_index: optionIndex });
+    }
+    fetchPolls();
+  };
+
+  // ── Safety check functions ──
+  const fetchSafetyChecks = useCallback(async () => {
+    const { data } = await supabase.from('safety_checks').select('*').eq('is_active', true).order('created_at', { ascending: false });
+    if (data) {
+      setSafetyChecks(data);
+      const respMap: Record<string, any[]> = {};
+      for (const sc of data) {
+        const { data: resps } = await supabase.from('safety_responses').select('*').eq('check_id', sc.id);
+        respMap[sc.id] = resps ?? [];
+      }
+      setSafetyResponses(respMap);
+    }
+  }, []);
+
+  useEffect(() => { fetchSafetyChecks(); }, [fetchSafetyChecks]);
+
+  const createSafetyCheck = async () => {
+    if (!safetyTitle.trim()) { alert('タイトルが必要です'); return; }
+    await supabase.from('safety_checks').insert({
+      title: safetyTitle.trim(), description: safetyDesc.trim(), creator_id: userIdRef.current,
+    });
+    setSafetyModalVisible(false);
+    setSafetyTitle(''); setSafetyDesc('');
+    fetchSafetyChecks();
+    // 全チャンネルにメッセージを投稿
+    await supabase.from('messages').insert({
+      channel_id: channelId, sender_id: userIdRef.current,
+      content: `🚨 安否確認: ${safetyTitle.trim()}\n${safetyDesc.trim()}\n\n※チャット画面上部のバナーから回答してください`,
+    });
+  };
+
+  const respondSafety = async (checkId: string, status: string) => {
+    if (!userIdRef.current) return;
+    await supabase.from('safety_responses').upsert({
+      check_id: checkId, user_id: userIdRef.current, status, comment: '',
+    }, { onConflict: 'check_id,user_id' });
+    fetchSafetyChecks();
+  };
+
   const sendMessage = async () => {
     if (!inputText.trim() || !userIdRef.current) return;
     const content = inputText.trim();
@@ -413,10 +514,11 @@ export default function ChatScreen({ channelId, channelName, onBack, onOpenTabs,
         const otherIds = (members ?? []).map((m: any) => m.user_id).filter((id: string) => id !== userIdRef.current);
         if (otherIds.length > 0) {
           const senderName = prof?.display_name ?? '';
-          fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/send-push', {
+          fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/web-push', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
+              action: 'send',
               user_ids: otherIds,
               title: `#${channelName}`,
               body: `${senderName}: ${content.slice(0, 100)}`,
@@ -470,7 +572,7 @@ export default function ChatScreen({ channelId, channelName, onBack, onOpenTabs,
   const recallMessage = async () => {
     if (!selectedMsg) return;
     setMsgMenuVisible(false);
-    if (!window.confirm('このメッセージを取り消しますか？')) return;
+    if (!await confirmDialog('このメッセージを取り消しますか？')) return;
     const msgId = selectedMsg.id;
     await supabase.from('messages').update({
       content: 'このメッセージは取り消されました',
@@ -487,7 +589,7 @@ export default function ChatScreen({ channelId, channelName, onBack, onOpenTabs,
   const deleteMessage = async () => {
     if (!selectedMsg) return;
     setMsgMenuVisible(false);
-    if (!window.confirm('完全に削除しますか？')) return;
+    if (!await confirmDialog('完全に削除しますか？')) return;
     const msgId = selectedMsg.id;
     await supabase.from('messages').delete().eq('id', msgId);
     realtimeChannelRef.current?.send({
@@ -589,6 +691,11 @@ export default function ChatScreen({ channelId, channelName, onBack, onOpenTabs,
               <Text style={styles.headerIcon}>👥</Text>
             </TouchableOpacity>
           )}
+          {isAdmin && (
+            <TouchableOpacity onPress={() => setSafetyModalVisible(true)} style={styles.headerIconBtn}>
+              <Text style={styles.headerIcon}>🚨</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
@@ -663,9 +770,76 @@ export default function ChatScreen({ channelId, channelName, onBack, onOpenTabs,
         </View>
       )}
 
+      {/* アクティブな安否確認バナー */}
+      {safetyChecks.length > 0 && (() => {
+        const sc = safetyChecks[0];
+        const myResp = (safetyResponses[sc.id] ?? []).find((r: any) => r.user_id === userIdRef.current);
+        const allResps = safetyResponses[sc.id] ?? [];
+        const safeCount = allResps.filter((r: any) => r.status === 'safe').length;
+        const totalResps = allResps.length;
+        return (
+          <View style={{ backgroundColor: '#FEF2F2', borderBottomWidth: 1, borderBottomColor: '#FECACA', padding: 12 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+              <Text style={{ fontSize: 16, marginRight: 6 }}>🚨</Text>
+              <Text style={{ fontSize: 14, fontWeight: 'bold', color: '#DC2626', flex: 1 }}>{sc.title}</Text>
+              <Text style={{ fontSize: 11, color: '#94A3B8' }}>回答 {totalResps}件 (無事 {safeCount})</Text>
+            </View>
+            {sc.description ? <Text style={{ fontSize: 12, color: '#64748B', marginBottom: 6 }}>{sc.description}</Text> : null}
+            {myResp ? (
+              <Text style={{ fontSize: 13, color: '#22C55E', fontWeight: '600' }}>
+                {myResp.status === 'safe' ? '✅ 無事と回答済み' : myResp.status === 'help' ? '🆘 救助要請済み' : '⚠️ 軽傷と回答済み'}
+              </Text>
+            ) : (
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <TouchableOpacity onPress={() => respondSafety(sc.id, 'safe')} style={{ flex: 1, backgroundColor: '#22C55E', borderRadius: 8, padding: 8, alignItems: 'center' }}>
+                  <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 13 }}>✅ 無事</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => respondSafety(sc.id, 'minor')} style={{ flex: 1, backgroundColor: '#F59E0B', borderRadius: 8, padding: 8, alignItems: 'center' }}>
+                  <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 13 }}>⚠️ 軽傷</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => respondSafety(sc.id, 'help')} style={{ flex: 1, backgroundColor: '#EF4444', borderRadius: 8, padding: 8, alignItems: 'center' }}>
+                  <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 13 }}>🆘 救助</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </View>
+        );
+      })()}
+
+      {/* アクティブなアンケート */}
+      {polls.slice(0, 2).map(p => {
+        const options = (p.options as string[]) ?? [];
+        const votes = pollVotes[p.id] ?? [];
+        const totalVotes = votes.length;
+        const myVotes = votes.filter((v: any) => v.user_id === userIdRef.current).map((v: any) => v.option_index);
+        return (
+          <View key={p.id} style={{ backgroundColor: '#F0F9FF', borderBottomWidth: 1, borderBottomColor: '#BAE6FD', padding: 12 }}>
+            <Text style={{ fontSize: 14, fontWeight: 'bold', color: '#0369A1', marginBottom: 8 }}>📊 {p.question}</Text>
+            {options.map((opt: string, i: number) => {
+              const count = votes.filter((v: any) => v.option_index === i).length;
+              const pct = totalVotes > 0 ? Math.round(count / totalVotes * 100) : 0;
+              const voted = myVotes.includes(i);
+              return (
+                <TouchableOpacity key={i} onPress={() => votePoll(p.id, i)}
+                  style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: voted ? '#DBEAFE' : '#fff', borderRadius: 8, padding: 8, marginBottom: 4, borderWidth: 1, borderColor: voted ? '#3B82F6' : '#E2E8F0' }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 13, color: '#1E293B', fontWeight: voted ? 'bold' : 'normal' }}>{opt}</Text>
+                  </View>
+                  <Text style={{ fontSize: 12, color: '#64748B', marginLeft: 8 }}>{count}票 ({pct}%)</Text>
+                </TouchableOpacity>
+              );
+            })}
+            <Text style={{ fontSize: 11, color: '#94A3B8', marginTop: 4 }}>合計 {totalVotes}票{p.is_multiple ? ' (複数選択可)' : ''}{p.is_anonymous ? ' (匿名)' : ''}</Text>
+          </View>
+        );
+      })}
+
       <View style={styles.inputBar}>
         <TouchableOpacity style={styles.attachButton} onPress={pickAndUploadImage} disabled={uploading}>
           <Text style={styles.attachIcon}>{uploading ? '⏳' : '📎'}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={{ paddingHorizontal: 4 }} onPress={() => setPollModalVisible(true)}>
+          <Text style={{ fontSize: 20 }}>📊</Text>
         </TouchableOpacity>
         <TextInput
           style={styles.input}
@@ -681,6 +855,75 @@ export default function ChatScreen({ channelId, channelName, onBack, onOpenTabs,
           <Text style={styles.sendButtonText}>送信</Text>
         </TouchableOpacity>
       </View>
+
+      {/* アンケート作成モーダル */}
+      <Modal visible={pollModalVisible} transparent animationType="slide" onRequestClose={() => setPollModalVisible(false)}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(15,23,42,0.7)', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+          <View style={{ backgroundColor: '#fff', borderRadius: 16, padding: 20, width: '100%', maxWidth: 420 }}>
+            <Text style={{ fontSize: 18, fontWeight: 'bold', color: '#1E293B', marginBottom: 16 }}>📊 アンケート作成</Text>
+            <Text style={{ fontSize: 13, color: '#64748B', marginBottom: 4 }}>質問</Text>
+            <TextInput style={{ backgroundColor: '#F1F5F9', borderRadius: 8, padding: 10, fontSize: 14, marginBottom: 12 }}
+              value={pollQuestion} onChangeText={setPollQuestion} placeholder="質問を入力" />
+            <Text style={{ fontSize: 13, color: '#64748B', marginBottom: 4 }}>選択肢</Text>
+            {pollOptions.map((opt, i) => (
+              <View key={i} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+                <TextInput style={{ flex: 1, backgroundColor: '#F1F5F9', borderRadius: 8, padding: 10, fontSize: 14 }}
+                  value={opt} onChangeText={t => { const o = [...pollOptions]; o[i] = t; setPollOptions(o); }}
+                  placeholder={`選択肢 ${i + 1}`} />
+                {pollOptions.length > 2 && (
+                  <TouchableOpacity onPress={() => setPollOptions(pollOptions.filter((_, j) => j !== i))} style={{ marginLeft: 6 }}>
+                    <Text style={{ color: '#EF4444', fontSize: 18 }}>✕</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            ))}
+            <TouchableOpacity onPress={() => setPollOptions([...pollOptions, ''])} style={{ marginBottom: 12 }}>
+              <Text style={{ color: '#3B82F6', fontSize: 13 }}>＋ 選択肢を追加</Text>
+            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: 16, marginBottom: 16 }}>
+              <TouchableOpacity onPress={() => setPollMultiple(!pollMultiple)} style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Text style={{ fontSize: 18, marginRight: 4 }}>{pollMultiple ? '☑️' : '⬜'}</Text>
+                <Text style={{ fontSize: 13, color: '#475569' }}>複数選択</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => setPollAnonymous(!pollAnonymous)} style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Text style={{ fontSize: 18, marginRight: 4 }}>{pollAnonymous ? '☑️' : '⬜'}</Text>
+                <Text style={{ fontSize: 13, color: '#475569' }}>匿名</Text>
+              </TouchableOpacity>
+            </View>
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <TouchableOpacity onPress={() => setPollModalVisible(false)} style={{ flex: 1, backgroundColor: '#F1F5F9', borderRadius: 10, padding: 12, alignItems: 'center' }}>
+                <Text style={{ color: '#64748B', fontWeight: '600' }}>キャンセル</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={createPoll} style={{ flex: 1, backgroundColor: '#3B82F6', borderRadius: 10, padding: 12, alignItems: 'center' }}>
+                <Text style={{ color: '#fff', fontWeight: 'bold' }}>作成</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 安否確認作成モーダル */}
+      <Modal visible={safetyModalVisible} transparent animationType="slide" onRequestClose={() => setSafetyModalVisible(false)}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(15,23,42,0.7)', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+          <View style={{ backgroundColor: '#fff', borderRadius: 16, padding: 20, width: '100%', maxWidth: 420 }}>
+            <Text style={{ fontSize: 18, fontWeight: 'bold', color: '#DC2626', marginBottom: 16 }}>🚨 安否確認を発信</Text>
+            <Text style={{ fontSize: 13, color: '#64748B', marginBottom: 4 }}>タイトル</Text>
+            <TextInput style={{ backgroundColor: '#F1F5F9', borderRadius: 8, padding: 10, fontSize: 14, marginBottom: 12 }}
+              value={safetyTitle} onChangeText={setSafetyTitle} placeholder="例: 地震発生 安否確認" />
+            <Text style={{ fontSize: 13, color: '#64748B', marginBottom: 4 }}>詳細（任意）</Text>
+            <TextInput style={{ backgroundColor: '#F1F5F9', borderRadius: 8, padding: 10, fontSize: 14, marginBottom: 16, minHeight: 60 }}
+              value={safetyDesc} onChangeText={setSafetyDesc} placeholder="例: 震度5の地震が発生しました。安否を報告してください。" multiline />
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <TouchableOpacity onPress={() => setSafetyModalVisible(false)} style={{ flex: 1, backgroundColor: '#F1F5F9', borderRadius: 10, padding: 12, alignItems: 'center' }}>
+                <Text style={{ color: '#64748B', fontWeight: '600' }}>キャンセル</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={createSafetyCheck} style={{ flex: 1, backgroundColor: '#DC2626', borderRadius: 10, padding: 12, alignItems: 'center' }}>
+                <Text style={{ color: '#fff', fontWeight: 'bold' }}>発信する</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* リッチメニュー編集モーダル */}
       <Modal visible={richMenuEditModal} transparent animationType="slide" onRequestClose={() => setRichMenuEditModal(false)}>

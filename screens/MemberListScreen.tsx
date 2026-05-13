@@ -22,10 +22,11 @@ type Member = {
 type Props = {
   onBack: () => void;
   onStartDM: (partnerId: string, partnerName: string) => void;
+  onStartCall?: (partnerId: string, partnerName: string) => void;
   currentUserId: string | null;
 };
 
-export default function MemberListScreen({ onBack, onStartDM, currentUserId }: Props) {
+export default function MemberListScreen({ onBack, onStartDM, onStartCall, currentUserId }: Props) {
   const [members, setMembers] = useState<Member[]>([]);
   const [selectedMember, setSelectedMember] = useState<Member | null>(null);
 
@@ -51,7 +52,6 @@ export default function MemberListScreen({ onBack, onStartDM, currentUserId }: P
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'online': return '#1A3C8F';
-      case 'away': return '#FFA500';
       default: return '#999';
     }
   };
@@ -59,7 +59,6 @@ export default function MemberListScreen({ onBack, onStartDM, currentUserId }: P
   const getStatusLabel = (status: string) => {
     switch (status) {
       case 'online': return 'オンライン';
-      case 'away': return '離席中';
       default: return 'オフライン';
     }
   };
@@ -216,15 +215,28 @@ export default function MemberListScreen({ onBack, onStartDM, currentUserId }: P
 
                 {/* アクションボタン */}
                 {selectedMember.id !== currentUserId && (
-                  <TouchableOpacity
-                    style={styles.dmButton}
-                    onPress={() => {
-                      setSelectedMember(null);
-                      onStartDM(selectedMember.id, selectedMember.display_name);
-                    }}
-                  >
-                    <Text style={styles.dmButtonText}>💬 DMを送る</Text>
-                  </TouchableOpacity>
+                  <View style={{ flexDirection: 'row', gap: 10, justifyContent: 'center' }}>
+                    <TouchableOpacity
+                      style={styles.dmButton}
+                      onPress={() => {
+                        setSelectedMember(null);
+                        onStartDM(selectedMember.id, selectedMember.display_name);
+                      }}
+                    >
+                      <Text style={styles.dmButtonText}>💬 DMを送る</Text>
+                    </TouchableOpacity>
+                    {onStartCall && (
+                      <TouchableOpacity
+                        style={[styles.dmButton, { backgroundColor: '#22C55E' }]}
+                        onPress={() => {
+                          setSelectedMember(null);
+                          onStartCall(selectedMember.id, selectedMember.display_name);
+                        }}
+                      >
+                        <Text style={styles.dmButtonText}>📞 音声通話</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
                 )}
 
               </ScrollView>

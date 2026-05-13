@@ -1,14 +1,20 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
   Modal, TextInput, Alert, ScrollView, ActivityIndicator, Linking,
+  Animated, Easing, Dimensions, Platform,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import { supabase } from '../lib/supabase';
+import { confirmDialog, alertDialog, nxStorageGet, nxStorageSet, injectStyleOnce, downloadBlob } from '../lib/platformHelpers';
+import LayoutEditorScreen from './LayoutEditorScreen';
+import BusinessBalanceScreen from './BusinessBalanceScreen';
+import QuotationOrderScreen from './QuotationOrderScreen';
+import AreaMapScreen from './AreaMapScreen';
 
 // ─── Types ────────────────────────────────────────────────────
-type SubScreen = 'portal' | 'bulletin' | 'tasks' | 'attendance' | 'attend_admin' | 'attend_settings' | 'schedule' | 'reports' | 'gantt' | 'cards' | 'extlinks' | 'mail' | 'mypage';
+type SubScreen = 'portal' | 'bulletin' | 'tasks' | 'attendance' | 'attend_admin' | 'attend_settings' | 'schedule' | 'reports' | 'gantt' | 'cards' | 'extlinks' | 'mail' | 'mypage' | 'vehicles' | 'interviews' | 'layout' | 'balance' | 'quotation' | 'fieldtools' | 'areamap';
 
 type Bookmark = {
   id: string;
@@ -42,13 +48,13 @@ type Task = {
   id: string;
   created_by: string;
   assigned_to: string | null;
+  assignee_ids: string[];
   title: string;
   description: string | null;
   status: '未着手' | '進行中' | '完了';
   priority: '高' | '中' | '低';
   due_date: string | null;
   created_at: string;
-  assignee?: { display_name: string } | null;
 };
 
 type Attendance = {
@@ -84,6 +90,15 @@ type Report = {
   updated_at: string;
   profiles?: { display_name: string } | null;
   approver?: { display_name: string } | null;
+};
+
+type ReportComment = {
+  id: string;
+  report_id: string;
+  author_id: string | null;
+  content: string;
+  created_at: string;
+  profiles?: { display_name: string } | null;
 };
 
 type GanttProject = {
@@ -177,11 +192,16 @@ type ScheduleEvent = {
   user_id: string;
   title: string;
   event_date: string;
+  end_date: string | null;
   start_time: string | null;
   end_time: string | null;
-  event_type: '会議' | '出張' | '休み' | '有給' | 'その他';
+  event_type: '会議' | '出張' | '休み' | '有給' | '現場' | '事務所' | 'その他';
   all_day: boolean;
   memo: string | null;
+  status: string | null;
+  assigned_by: string | null;
+  location: string | null;
+  completed_at: string | null;
 };
 
 type Props = {
@@ -199,7 +219,7 @@ const CATEGORY_COLORS: Record<string, { bg: string; text: string }> = {
 const PRIORITY_COLOR: Record<string, string> = { '高': '#EF4444', '中': '#F59E0B', '低': '#9CA3AF' };
 const STATUS_COLOR:   Record<string, string> = { '未着手': '#9CA3AF', '進行中': '#3B82F6', '完了': '#10B981' };
 
-function todayStr() { return new Date().toISOString().slice(0, 10); }
+function todayStr() { return dateStr(new Date()); }
 // 出勤できる条件: まだ1回も打っていない OR 1回目退勤済みで2回目未打刻
 function canClockIn(r: Attendance | null) {
   if (!r) return true;
@@ -252,8 +272,15 @@ const NAV_ITEMS: { key: SubScreen; icon: string; label: string; color: string }[
   { key: 'attendance', icon: '🕐', label: '勤怠管理',  color: '#F59E0B' },
   { key: 'schedule',   icon: '📅', label: '予定表',    color: '#8B5CF6' },
   { key: 'reports',    icon: '📝', label: '報告書',    color: '#EC4899' },
+  { key: 'quotation',  icon: '📋', label: '見積/発注',  color: '#9333EA' },
   { key: 'gantt',      icon: '📊', label: 'ガント',    color: '#0EA5E9' },
   { key: 'cards',      icon: '🪪', label: '名刺共有',  color: '#14B8A6' },
+  { key: 'vehicles',   icon: '🚗', label: '車両管理',  color: '#EF4444' },
+  { key: 'interviews', icon: '👔', label: '面談シート', color: '#7C3AED' },
+  { key: 'balance',    icon: '💰', label: '収支',       color: '#16A34A' },
+  { key: 'layout',     icon: '📐', label: '倉庫レイアウト', color: '#059669' },
+  { key: 'areamap',    icon: '🗾', label: 'エリア地図', color: '#0EA5E9' },
+  { key: 'fieldtools', icon: '🛠️', label: '現場運用ツール', color: '#0891B2' },
   { key: 'extlinks',   icon: '🔗', label: '他機能',    color: '#6366F1' },
   { key: 'mypage',     icon: '⭐', label: 'マイページ', color: '#F59E0B' },
 ];
@@ -263,10 +290,42 @@ const EVENT_TYPE_COLORS: Record<string, { bg: string; text: string; border: stri
   '出張': { bg: '#D1FAE5', text: '#065F46', border: '#6EE7B7' },
   '休み': { bg: '#FEE2E2', text: '#DC2626', border: '#FCA5A5' },
   '有給': { bg: '#FED7AA', text: '#C2410C', border: '#FDBA74' },
+  '現場': { bg: '#E0E7FF', text: '#4338CA', border: '#A5B4FC' },
+  '事務所': { bg: '#CFFAFE', text: '#0E7490', border: '#67E8F9' },
   'その他': { bg: '#F3F4F6', text: '#4B5563', border: '#D1D5DB' },
 };
-const EVENT_TYPES = ['会議', '出張', '休み', '有給', 'その他'] as const;
+const EVENT_TYPES = ['会議', '出張', '休み', '有給', '現場', '事務所', 'その他'] as const;
 const DAY_NAMES = ['日', '月', '火', '水', '木', '金', '土'];
+
+// 日本の祝日（2024-2027）— YYYY-MM-DD形式
+const JP_HOLIDAYS: Record<string, string> = {
+  // 2024
+  '2024-01-01': '元日', '2024-01-08': '成人の日', '2024-02-11': '建国記念の日', '2024-02-12': '振替休日',
+  '2024-02-23': '天皇誕生日', '2024-03-20': '春分の日', '2024-04-29': '昭和の日', '2024-05-03': '憲法記念日',
+  '2024-05-04': 'みどりの日', '2024-05-05': 'こどもの日', '2024-05-06': '振替休日', '2024-07-15': '海の日',
+  '2024-08-11': '山の日', '2024-08-12': '振替休日', '2024-09-16': '敬老の日', '2024-09-22': '秋分の日',
+  '2024-09-23': '振替休日', '2024-10-14': 'スポーツの日', '2024-11-03': '文化の日', '2024-11-04': '振替休日',
+  '2024-11-23': '勤労感謝の日',
+  // 2025
+  '2025-01-01': '元日', '2025-01-13': '成人の日', '2025-02-11': '建国記念の日', '2025-02-23': '天皇誕生日',
+  '2025-02-24': '振替休日', '2025-03-20': '春分の日', '2025-04-29': '昭和の日', '2025-05-03': '憲法記念日',
+  '2025-05-04': 'みどりの日', '2025-05-05': 'こどもの日', '2025-05-06': '振替休日', '2025-07-21': '海の日',
+  '2025-08-11': '山の日', '2025-09-15': '敬老の日', '2025-09-23': '秋分の日', '2025-10-13': 'スポーツの日',
+  '2025-11-03': '文化の日', '2025-11-23': '勤労感謝の日', '2025-11-24': '振替休日',
+  // 2026
+  '2026-01-01': '元日', '2026-01-12': '成人の日', '2026-02-11': '建国記念の日', '2026-02-23': '天皇誕生日',
+  '2026-03-20': '春分の日', '2026-04-29': '昭和の日', '2026-05-03': '憲法記念日', '2026-05-04': 'みどりの日',
+  '2026-05-05': 'こどもの日', '2026-05-06': '振替休日', '2026-07-20': '海の日', '2026-08-11': '山の日',
+  '2026-09-21': '敬老の日', '2026-09-22': '国民の休日', '2026-09-23': '秋分の日', '2026-10-12': 'スポーツの日',
+  '2026-11-03': '文化の日', '2026-11-23': '勤労感謝の日',
+  // 2027
+  '2027-01-01': '元日', '2027-01-11': '成人の日', '2027-02-11': '建国記念の日', '2027-02-23': '天皇誕生日',
+  '2027-03-21': '春分の日', '2027-03-22': '振替休日', '2027-04-29': '昭和の日', '2027-05-03': '憲法記念日',
+  '2027-05-04': 'みどりの日', '2027-05-05': 'こどもの日', '2027-07-19': '海の日', '2027-08-11': '山の日',
+  '2027-09-20': '敬老の日', '2027-09-23': '秋分の日', '2027-10-11': 'スポーツの日', '2027-11-03': '文化の日',
+  '2027-11-23': '勤労感謝の日',
+};
+function isHoliday(d: Date): string | null { return JP_HOLIDAYS[dateStr(d)] ?? null; }
 
 function getMonday(date: Date): Date {
   const d = new Date(date);
@@ -275,7 +334,7 @@ function getMonday(date: Date): Date {
   d.setHours(0, 0, 0, 0);
   return d;
 }
-function dateStr(d: Date): string { return d.toISOString().slice(0, 10); }
+function dateStr(d: Date): string { return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
 function isToday(d: Date): boolean { return dateStr(d) === dateStr(new Date()); }
 
 // ═══════════════════════════════════════════════════════════════
@@ -309,11 +368,18 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
 
   // ── Portal data ───────────────────────────────────────────
   const [pinnedPost,   setPinnedPost]   = useState<BulletinPost | null>(null);
+  const [logisticsItems, setLogisticsItems] = useState<{title:string;link:string;pubDate:string;summary:string;image:string;source:string}[]>([]);
+  const logisticsAnimsRef = useRef<Animated.Value[]>([]);
+  // ニュース弾幕（1行マーキー）用
+  const newsMarqueeAnim = useRef(new Animated.Value(0)).current;
+  const [newsMarqueeWidth, setNewsMarqueeWidth] = useState(0);
   const [latestPosts,  setLatestPosts]  = useState<BulletinPost[]>([]);
   const [myTasks,      setMyTasks]      = useState<Task[]>([]);
+  const [recentReports, setRecentReports] = useState<(Report & { _notifId?: string | null })[]>([]);
   const [todayRecord,  setTodayRecord]  = useState<Attendance | null>(null);
   const [portalLoading, setPortalLoading] = useState(true);
   const [myName, setMyName] = useState('');
+  const [pendingEvents, setPendingEvents] = useState<(ScheduleEvent & {assigner_name?:string})[]>([]);
 
   // ── Bulletin ──────────────────────────────────────────────
   const [posts,         setPosts]         = useState<BulletinPost[]>([]);
@@ -335,7 +401,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   const [taskDesc,    setTaskDesc]    = useState('');
   const [taskPriority,setTaskPriority]= useState<'高'|'中'|'低'>('中');
   const [taskDue,     setTaskDue]     = useState('');
-  const [taskAssignee,setTaskAssignee]= useState<string|null>(null);
+  const [taskAssigneeIds, setTaskAssigneeIds] = useState<string[]>([]);
   const [members,     setMembers]     = useState<Member[]>([]);
   const [loadingTasks,setLoadingTasks]= useState(false);
 
@@ -385,16 +451,19 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   const [reportModal,    setReportModal]    = useState(false);
   const [editingReport,  setEditingReport]  = useState<Report | null>(null);
   const [viewReport,     setViewReport]     = useState<Report | null>(null);
+  const [reportComments, setReportComments] = useState<ReportComment[]>([]);
   const [rpTitle,        setRpTitle]        = useState('');
   const [rpDate,         setRpDate]         = useState('');
   const [rpCategory,     setRpCategory]     = useState('会議議事録');
   const [rpParticipants, setRpParticipants] = useState('');
+  const [rpParticipantIds, setRpParticipantIds] = useState<string[]>([]);
   const [rpExtParticipants, setRpExtParticipants] = useState('');
   const [rpContent,      setRpContent]      = useState('');
   const [rpStatus,       setRpStatus]       = useState<Report['status']>('下書き');
   const [rpComment,      setRpComment]      = useState('');
   const [savingReport,   setSavingReport]   = useState(false);
   const [loadingReports, setLoadingReports] = useState(false);
+  const [reportNotifs,   setReportNotifs]   = useState<{ id: string; report_id: string; report_title: string; report_date: string; author_name: string }[]>([]);
 
   // ── Mail ──────────────────────────────────────────────────
   const [mails, setMails] = useState<InternalMail[]>([]);
@@ -454,6 +523,182 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   const [loadingBc, setLoadingBc] = useState(false);
   const [ocrLoading, setOcrLoading] = useState(false);
 
+  // ── Vehicles ──────────────────────────────────────────────
+  const [vehicles, setVehicles] = useState<any[]>([]);
+  const [vehiclesLoading, setVehiclesLoading] = useState(false);
+  const [vehicleSearch, setVehicleSearch] = useState('');
+  const [vehicleDetail, setVehicleDetail] = useState<any | null>(null);
+  const [vehicleModal, setVehicleModal] = useState(false);
+  const [editVehicle, setEditVehicle] = useState<any | null>(null);
+  const [savingVehicle, setSavingVehicle] = useState(false);
+  const [vName, setVName] = useState('');
+  const [vMaker, setVMaker] = useState('');
+  const [vCarName, setVCarName] = useState('');
+  const [vChassis, setVChassis] = useState('');
+  const [vNumber, setVNumber] = useState('');
+  const [vNumberColor, setVNumberColor] = useState('');
+  const [vTax, setVTax] = useState('');
+  const [vInsurance, setVInsurance] = useState('');
+  const [vCategory, setVCategory] = useState('');
+  const [vOwner, setVOwner] = useState('');
+  const [vInspExpiry, setVInspExpiry] = useState('');
+  const [vInspNotify, setVInspNotify] = useState('');
+  const [vPayDate, setVPayDate] = useState('');
+  const [vAmount, setVAmount] = useState('');
+  const [vScrapped, setVScrapped] = useState('');
+
+  useEffect(() => { if (screen === 'vehicles') fetchVehicles(); }, [screen]);
+
+  const vehicleApiCall = async (action: string, vehicle?: any) => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) throw new Error('ログインが必要です');
+    const resp = await fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/read-vehicle-sheet', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}`, 'apikey': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jY29nbnB0b3ByaHdzYmpud2N1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzNDU0NDEsImV4cCI6MjA4OTkyMTQ0MX0.M3h31uPyKYWlNevVW3OvZOonoTidC1KLZ04sB5nRKzU' },
+      body: JSON.stringify({ action, vehicle }),
+    });
+    return resp.json();
+  };
+
+  const fetchVehicles = async () => {
+    setVehiclesLoading(true);
+    try {
+      const json = await vehicleApiCall('list');
+      if (json.vehicles) setVehicles(json.vehicles);
+      else setVehicles([]);
+    } catch (_) { setVehicles([]); }
+    setVehiclesLoading(false);
+  };
+
+  const openAddVehicle = () => {
+    setEditVehicle(null);
+    setVName(''); setVMaker(''); setVCarName(''); setVChassis(''); setVNumber('');
+    setVNumberColor(''); setVTax(''); setVInsurance(''); setVCategory(''); setVOwner('');
+    setVInspExpiry(''); setVInspNotify(''); setVPayDate(''); setVAmount(''); setVScrapped('');
+    setVehicleModal(true);
+  };
+
+  const openEditVehicle = (v: any) => {
+    setEditVehicle(v);
+    setVName(v.name ?? ''); setVMaker(v.maker ?? ''); setVCarName(v.car_name ?? '');
+    setVChassis(v.chassis ?? ''); setVNumber(v.number ?? ''); setVNumberColor(v.number_color ?? '');
+    setVTax(v.tax ?? ''); setVInsurance(v.insurance ?? ''); setVCategory(v.category ?? '');
+    setVOwner(v.owner ?? ''); setVInspExpiry(v.inspection_expiry ?? '');
+    setVInspNotify(v.inspection_notify ?? ''); setVPayDate(v.payment_date ?? '');
+    setVAmount(v.amount ?? ''); setVScrapped(v.scrapped ?? '');
+    setVehicleModal(true);
+  };
+
+  const saveVehicle = async () => {
+    if (!vMaker.trim() && !vNumber.trim()) { alert('メーカーまたはナンバーは必須です'); return; }
+    setSavingVehicle(true);
+    const payload: any = {
+      timestamp: editVehicle?.timestamp || new Date().toLocaleString('ja-JP'),
+      name: vName, tax: vTax, maker: vMaker, car_name: vCarName, chassis: vChassis,
+      number: vNumber, number_color: vNumberColor, inspection_photo: editVehicle?.inspection_photo ?? '',
+      insurance: vInsurance, category: vCategory, owner: vOwner,
+      inspection_expiry: vInspExpiry, inspection_notify: vInspNotify,
+      payment_date: vPayDate, amount: vAmount, scrapped: vScrapped,
+    };
+    if (editVehicle?.row_number) payload.row_number = editVehicle.row_number;
+    try {
+      await vehicleApiCall(editVehicle ? 'update' : 'add', payload);
+      setVehicleModal(false); setVehicleDetail(null); await fetchVehicles();
+    } catch (e: any) { alert('エラー: ' + e.message); }
+    setSavingVehicle(false);
+  };
+
+  const deleteVehicle = async (v: any) => {
+    if (!confirm(`${v.maker} ${v.car_name} (${v.number}) を削除しますか？`)) return;
+    try {
+      await vehicleApiCall('delete', { row_number: v.row_number });
+      setVehicleDetail(null); await fetchVehicles();
+    } catch (e: any) { alert('エラー: ' + e.message); }
+  };
+
+  // ── Interviews (面談シート) ──────────────────────────────
+  const [interviews, setInterviews] = useState<any[]>([]);
+  const [interviewsLoading, setInterviewsLoading] = useState(false);
+  const [interviewSearch, setInterviewSearch] = useState('');
+  const [interviewDetail, setInterviewDetail] = useState<any | null>(null);
+  const [interviewEditModal, setInterviewEditModal] = useState(false);
+  const [editInterview, setEditInterview] = useState<any | null>(null);
+  const [savingInterview, setSavingInterview] = useState(false);
+  const [ivContractStatus, setIvContractStatus] = useState('');
+  const [ivDateComment, setIvDateComment] = useState('');
+  const [ivResult, setIvResult] = useState('');
+  const [ivResultSite, setIvResultSite] = useState('');
+  const [ivNonHireReason, setIvNonHireReason] = useState('');
+  const [ivMasterUpdate, setIvMasterUpdate] = useState('');
+  const [interviewFilter, setInterviewFilter] = useState<string>('all');
+
+  useEffect(() => { if (screen === 'interviews') fetchInterviews(); }, [screen]);
+
+  const interviewApiCall = async (action: string, record?: any) => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) throw new Error('ログインが必要です');
+    const resp = await fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/interview-sheet', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}`, 'apikey': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jY29nbnB0b3ByaHdzYmpud2N1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzNDU0NDEsImV4cCI6MjA4OTkyMTQ0MX0.M3h31uPyKYWlNevVW3OvZOonoTidC1KLZ04sB5nRKzU' },
+      body: JSON.stringify({ action, record }),
+    });
+    return resp.json();
+  };
+
+  const fetchInterviews = async () => {
+    setInterviewsLoading(true);
+    try {
+      const json = await interviewApiCall('list');
+      if (json.records) setInterviews(json.records);
+      else setInterviews([]);
+    } catch (_) { setInterviews([]); }
+    setInterviewsLoading(false);
+  };
+
+  const openEditInterview = (r: any) => {
+    setEditInterview(r);
+    setIvContractStatus(r.contract_status ?? '');
+    setIvDateComment(r.interview_date_comment ?? '');
+    setIvResult(r.interview_result ?? '');
+    setIvResultSite(r.result_site ?? '');
+    setIvNonHireReason(r.non_hire_reason ?? '');
+    setIvMasterUpdate(r.master_update ?? '');
+    setInterviewEditModal(true);
+  };
+
+  const saveInterview = async () => {
+    if (!editInterview) return;
+    setSavingInterview(true);
+    try {
+      await interviewApiCall('update', {
+        row_number: editInterview.row_number,
+        contract_status: ivContractStatus,
+        interview_date_comment: ivDateComment,
+        interview_result: ivResult,
+        result_site: ivResultSite,
+        non_hire_reason: ivNonHireReason,
+        master_update: ivMasterUpdate,
+      });
+      setInterviewEditModal(false); setInterviewDetail(null); await fetchInterviews();
+    } catch (e: any) { alert('エラー: ' + e.message); }
+    setSavingInterview(false);
+  };
+
+  const filteredInterviews = interviews.filter(r => {
+    if (interviewFilter === 'all') return true;
+    if (interviewFilter === 'none') return !r.contract_status;
+    if (interviewFilter === 'master_done') return !!r.master_update;
+    if (interviewFilter === 'master_none') return !r.master_update;
+    return (r.contract_status ?? '').includes(interviewFilter);
+  }).filter(r => {
+    if (!interviewSearch) return true;
+    return [r.name, r.preferred_site, r.interview_result, r.contract_status].filter(Boolean).join(' ').toLowerCase().includes(interviewSearch.toLowerCase());
+  });
+
+  const filteredVehicles = vehicleSearch
+    ? vehicles.filter(v => [v.name, v.maker, v.car_name, v.number, v.owner].filter(Boolean).join(' ').toLowerCase().includes(vehicleSearch.toLowerCase()))
+    : vehicles;
+
   // ── Gantt ─────────────────────────────────────────────────
   const [ganttProjects,   setGanttProjects]   = useState<GanttProject[]>([]);
   const [ganttTasks,      setGanttTasks]      = useState<GanttTask[]>([]);
@@ -487,6 +732,8 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   const [editingEvent,    setEditingEvent]    = useState<ScheduleEvent | null>(null);
   const [evTitle,         setEvTitle]         = useState('');
   const [evDate,          setEvDate]          = useState('');
+  const [evEndDate,       setEvEndDate]       = useState('');
+  const [evLocation,      setEvLocation]      = useState('');
   const [evType,          setEvType]          = useState<ScheduleEvent['event_type']>('その他');
   const [evStart,         setEvStart]         = useState('');
   const [evEnd,           setEvEnd]           = useState('');
@@ -495,13 +742,21 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   const [savingEvent,     setSavingEvent]     = useState(false);
 
   // ─── Portal load ─────────────────────────────────────────
+  const respondEvent = async (eventId: string, response: 'accepted' | 'declined') => {
+    await supabase.from('schedule_events').update({ status: response }).eq('id', eventId);
+    setPendingEvents(prev => prev.filter(e => e.id !== eventId));
+  };
+
   const loadPortal = useCallback(async () => {
     setPortalLoading(true);
-    const [profileRes, postsRes, tasksRes, attendRes] = await Promise.all([
+    const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const [profileRes, postsRes, tasksRes, attendRes, reportsRes, reportNotifsRes] = await Promise.all([
       supabase.from('profiles').select('display_name').eq('id', currentUserId).single(),
       supabase.from('bulletin_posts').select('*, profiles(display_name)').order('is_pinned', { ascending: false }).order('created_at', { ascending: false }).limit(6),
-      supabase.from('tasks').select('*, assignee:assigned_to(display_name)').neq('status', '完了').or(`assigned_to.eq.${currentUserId},created_by.eq.${currentUserId}`).order('due_date', { ascending: true, nullsFirst: false }).limit(5),
+      supabase.from('tasks').select('*').neq('status', '完了').or(`assignee_ids.cs.{${currentUserId}},assigned_to.eq.${currentUserId},created_by.eq.${currentUserId}`).order('due_date', { ascending: true, nullsFirst: false }).limit(5),
       supabase.from('attendance_records').select('*').eq('user_id', currentUserId).eq('work_date', todayStr()).maybeSingle(),
+      supabase.from('reports').select('*, profiles:author_id(display_name)').neq('status', '下書き').gte('created_at', since24h).order('created_at', { ascending: false }).limit(10),
+      supabase.from('report_notifications').select('id, reports(*, profiles:author_id(display_name))').eq('recipient_id', currentUserId).eq('dismissed', false).order('created_at', { ascending: false }).limit(20),
     ]);
     if (profileRes.data) setMyName(profileRes.data.display_name);
     if (postsRes.data) {
@@ -510,12 +765,98 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
       setLatestPosts(all.filter(p => !p.is_pinned).slice(0, 4));
     }
     if (tasksRes.data) setMyTasks(tasksRes.data as unknown as Task[]);
+    // 24h以内の新規報告書 + 未確認の通知 を統合
+    const merged = new Map<string, Report & { _notifId?: string | null }>();
+    for (const r of ((reportsRes.data as any[]) ?? []) as Report[]) {
+      merged.set(r.id, { ...r, _notifId: null });
+    }
+    for (const n of ((reportNotifsRes.data as any[]) ?? [])) {
+      const r = n.reports as Report | null;
+      if (!r) continue;
+      const existing = merged.get(r.id);
+      if (existing) existing._notifId = n.id;
+      else merged.set(r.id, { ...r, _notifId: n.id });
+    }
+    const sorted = [...merged.values()].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')).slice(0, 5);
+    setRecentReports(sorted);
     setTodayRecord(attendRes.data as Attendance | null);
     if (attendRes.data?.note) setAttendNote(attendRes.data.note);
+    // 未承認予定を取得（自分が作成したものは除外。assigned_byがNULLの旧データも含める）
+    const { data: pendingData } = await supabase
+      .from('schedule_events')
+      .select('*')
+      .eq('user_id', currentUserId)
+      .eq('status', 'pending')
+      .or(`assigned_by.neq.${currentUserId},assigned_by.is.null`)
+      .order('event_date', { ascending: true });
+    if (pendingData && pendingData.length > 0) {
+      // アサイン者の名前を取得
+      const assignerIds = [...new Set(pendingData.map((e: any) => e.assigned_by).filter(Boolean))];
+      const { data: assignerProfiles } = assignerIds.length > 0
+        ? await supabase.from('profiles').select('id, display_name').in('id', assignerIds)
+        : { data: [] };
+      const nameMap: Record<string, string> = {};
+      (assignerProfiles || []).forEach((p: any) => { nameMap[p.id] = p.display_name; });
+      setPendingEvents(pendingData.map((e: any) => ({ ...e, assigner_name: nameMap[e.assigned_by] || '' })));
+    } else {
+      setPendingEvents([]);
+    }
     setPortalLoading(false);
   }, [currentUserId]);
 
-  useEffect(() => { if (screen === 'portal') loadPortal(); }, [screen]);
+  // 物流ニュース (LNEWS RSS、1日1回キャッシュ)
+  const fetchLogisticsNews = useCallback(async () => {
+    try {
+      const todayKey = new Date().toISOString().slice(0, 10);
+      const cached = (() => {
+        try {
+          const raw = nxStorageGet('nx_logistics_news_v6_seibu_one');
+          if (!raw) return null;
+          const j = JSON.parse(raw);
+          if (j.date !== todayKey) return null;
+          return j.data;
+        } catch { return null; }
+      })();
+      if (cached && Array.isArray(cached.items) && cached.items.length > 0) {
+        setLogisticsItems(cached.items);
+        return;
+      }
+      const resp = await fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/logistics-news');
+      const data = await resp.json();
+      if (resp.ok && !data.error) {
+        if (Array.isArray(data.items) && data.items.length > 0) {
+          setLogisticsItems(data.items);
+          try { nxStorageSet('nx_logistics_news_v6_seibu_one', JSON.stringify({ date: todayKey, data })); } catch {}
+        }
+      }
+    } catch (_) {}
+  }, []);
+
+  // ニュース マーキー: CSS keyframes 1回だけ注入（Webのみ、ネイティブはno-op）
+  useEffect(() => {
+    injectStyleOnce('nx-news-marquee-css', `
+      @keyframes nx-news-marquee-anim {
+        from { transform: translateX(0); }
+        to { transform: translateX(-50%); }
+      }
+      .nx-news-marquee-inner {
+        animation: nx-news-marquee-anim var(--nx-marquee-duration, 20s) linear infinite;
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        white-space: nowrap;
+        will-change: transform;
+        position: absolute;
+        top: 0;
+        bottom: 0;
+      }
+      .nx-news-marquee-inner:hover {
+        animation-play-state: paused;
+      }
+    `);
+  }, []);
+
+  useEffect(() => { if (screen === 'portal') { loadPortal(); fetchVehicles(); fetchInterviews(); fetchLogisticsNews(); } }, [screen]);
 
   // ─── Bulletin ────────────────────────────────────────────
   const fetchPosts = async () => {
@@ -562,7 +903,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   };
 
   const deletePost = async (post: BulletinPost) => {
-    if (!window.confirm(`「${post.title}」を削除しますか？`)) return;
+    if (!await confirmDialog(`「${post.title}」を削除しますか？`)) return;
     await supabase.from('bulletin_posts').delete().eq('id', post.id);
     setSelectedPost(null); await fetchPosts();
   };
@@ -579,7 +920,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
 
   const fetchTasks = async () => {
     setLoadingTasks(true);
-    const { data } = await supabase.from('tasks').select('*, assignee:assigned_to(display_name)').order('due_date', { ascending: true, nullsFirst: false }).order('created_at', { ascending: false });
+    const { data } = await supabase.from('tasks').select('*').order('due_date', { ascending: true, nullsFirst: false }).order('created_at', { ascending: false });
     if (data) setTasks(data as unknown as Task[]);
     setLoadingTasks(false);
   };
@@ -587,8 +928,17 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   const submitTask = async () => {
     if (!taskTitle.trim()) { alert('タイトルを入力してください'); return; }
     setSaving(true);
-    await supabase.from('tasks').insert({ created_by: currentUserId, assigned_to: taskAssignee, title: taskTitle.trim(), description: taskDesc.trim() || null, priority: taskPriority, due_date: taskDue || null, status: '未着手' });
-    setTaskModal(false); setTaskTitle(''); setTaskDesc(''); setTaskPriority('中'); setTaskDue(''); setTaskAssignee(null);
+    await supabase.from('tasks').insert({
+      created_by: currentUserId,
+      assigned_to: taskAssigneeIds[0] ?? null,
+      assignee_ids: taskAssigneeIds,
+      title: taskTitle.trim(),
+      description: taskDesc.trim() || null,
+      priority: taskPriority,
+      due_date: taskDue || null,
+      status: '未着手',
+    });
+    setTaskModal(false); setTaskTitle(''); setTaskDesc(''); setTaskPriority('中'); setTaskDue(''); setTaskAssigneeIds([]);
     await fetchTasks();
     setSaving(false);
   };
@@ -601,7 +951,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   };
 
   const deleteTask = async (task: Task) => {
-    if (!window.confirm(`「${task.title}」を削除しますか？`)) return;
+    if (!await confirmDialog(`「${task.title}」を削除しますか？`)) return;
     await supabase.from('tasks').delete().eq('id', task.id);
     setTasks(prev => prev.filter(t => t.id !== task.id));
   };
@@ -702,7 +1052,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   }, [screen]);
 
   const fetchAdminMembers = async () => {
-    const { data } = await supabase.from('profiles').select('id, display_name').eq('account_status', 'active').eq('employment_type', '社員').order('display_name');
+    const { data } = await supabase.from('profiles').select('id, display_name').eq('account_status', 'active').in('employment_type', ['社員', 'プランナー']).order('display_name');
     if (data) setAdminMembers(data as Member[]);
   };
 
@@ -784,7 +1134,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
     const [wpRes, assignRes, memRes] = await Promise.all([
       supabase.from('work_patterns').select('*').order('created_at'),
       supabase.from('user_work_patterns').select('*'),
-      supabase.from('profiles').select('id, display_name').eq('account_status', 'active').eq('employment_type', '社員').order('display_name'),
+      supabase.from('profiles').select('id, display_name').eq('account_status', 'active').in('employment_type', ['社員', 'プランナー']).order('display_name'),
     ]);
     if (wpRes.data) setWorkPatterns(wpRes.data as WorkPattern[]);
     if (assignRes.data) setUserWpAssigns(assignRes.data as UserWorkPattern[]);
@@ -830,7 +1180,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
 
   const deleteWp = async (wp: WorkPattern) => {
     if (wp.is_default) { alert('デフォルトパターンは削除できません'); return; }
-    if (!window.confirm(`「${wp.name}」を削除しますか？`)) return;
+    if (!await confirmDialog(`「${wp.name}」を削除しますか？`)) return;
     await supabase.from('work_patterns').delete().eq('id', wp.id);
     await fetchWorkPatterns();
   };
@@ -856,7 +1206,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   useEffect(() => { if (screen === 'mail') { fetchMails(); fetchMailMembers(); } }, [screen, mailTab]);
 
   const fetchMailMembers = async () => {
-    const { data } = await supabase.from('profiles').select('id, display_name').eq('account_status', 'active').eq('employment_type', '社員').order('display_name');
+    const { data } = await supabase.from('profiles').select('id, display_name').eq('account_status', 'active').in('employment_type', ['社員', 'プランナー']).order('display_name');
     if (data) setMailMembers(data as Member[]);
   };
 
@@ -982,7 +1332,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   };
 
   const deleteBm = async (bm: Bookmark) => {
-    if (!window.confirm(`「${bm.title}」を削除しますか？`)) return;
+    if (!await confirmDialog(`「${bm.title}」を削除しますか？`)) return;
     await supabase.from('user_bookmarks').delete().eq('id', bm.id);
     await fetchBookmarks();
   };
@@ -1022,7 +1372,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   };
 
   const deleteExtLink = async (l: ExternalLink) => {
-    if (!window.confirm(`「${l.title}」を削除しますか？`)) return;
+    if (!await confirmDialog(`「${l.title}」を削除しますか？`)) return;
     await supabase.from('external_links').delete().eq('id', l.id); await fetchExtLinks();
   };
 
@@ -1163,7 +1513,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   };
 
   const deleteBc = async (c: BusinessCard) => {
-    if (!window.confirm(`${c.company_name} ${c.person_name} の名刺を削除しますか？`)) return;
+    if (!await confirmDialog(`${c.company_name} ${c.person_name} の名刺を削除しますか？`)) return;
     try {
       await callCardsApi('delete', { id: c.id });
       setBcView(null); await fetchBcards();
@@ -1184,7 +1534,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
     const [pRes, tRes, mRes] = await Promise.all([
       supabase.from('gantt_projects').select('*').order('sort_order'),
       supabase.from('gantt_tasks').select('*').order('sort_order'),
-      supabase.from('profiles').select('id, display_name').eq('account_status', 'active').eq('employment_type', '社員').order('display_name'),
+      supabase.from('profiles').select('id, display_name').eq('account_status', 'active').in('employment_type', ['社員', 'プランナー']).order('display_name'),
     ]);
     if (pRes.data) setGanttProjects(pRes.data as GanttProject[]);
     if (tRes.data) setGanttTasks(tRes.data as GanttTask[]);
@@ -1207,7 +1557,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   };
 
   const deleteGProj = async (p: GanttProject) => {
-    if (!window.confirm(`「${p.name}」と全タスクを削除しますか？`)) return;
+    if (!await confirmDialog(`「${p.name}」と全タスクを削除しますか？`)) return;
     await supabase.from('gantt_projects').delete().eq('id', p.id); await fetchGantt();
   };
 
@@ -1236,12 +1586,39 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   };
 
   const deleteGTask = async (t: GanttTask) => {
-    if (!window.confirm(`「${t.title}」を削除しますか？`)) return;
+    if (!await confirmDialog(`「${t.title}」を削除しますか？`)) return;
     await supabase.from('gantt_tasks').delete().eq('id', t.id); await fetchGantt();
   };
 
   // ─── Reports ─────────────────────────────────────────────
-  useEffect(() => { if (screen === 'reports') fetchReports(); }, [screen, reportFilter]);
+  useEffect(() => { if (screen === 'reports') { fetchReports(); fetchMembers(); fetchReportNotifs(); } }, [screen, reportFilter]);
+
+  const fetchReportNotifs = async () => {
+    const { data } = await supabase
+      .from('report_notifications')
+      .select('id, report_id, reports(title, report_date, author_id)')
+      .eq('recipient_id', currentUserId)
+      .eq('dismissed', false)
+      .order('created_at', { ascending: false });
+    if (!data || data.length === 0) { setReportNotifs([]); return; }
+    const authorIds = [...new Set(data.map((n: any) => n.reports?.author_id).filter(Boolean))];
+    const { data: profs } = authorIds.length > 0
+      ? await supabase.from('profiles').select('id, display_name').in('id', authorIds)
+      : { data: [] };
+    const nameMap = new Map<string, string>(((profs as any[]) || []).map((p: any) => [p.id, p.display_name]));
+    setReportNotifs(data.map((n: any) => ({
+      id: n.id,
+      report_id: n.report_id,
+      report_title: n.reports?.title ?? '',
+      report_date: n.reports?.report_date ?? '',
+      author_name: nameMap.get(n.reports?.author_id) ?? '',
+    })));
+  };
+
+  const dismissReportNotif = async (id: string) => {
+    await supabase.from('report_notifications').update({ dismissed: true }).eq('id', id);
+    setReportNotifs(prev => prev.filter(n => n.id !== id));
+  };
 
   const REPORT_CATS = ['会議議事録', '業務報告', '出張報告', '日報', '週報', '月報', 'その他'] as const;
   const REPORT_STATUS_COLOR: Record<string, { bg: string; text: string }> = {
@@ -1279,9 +1656,11 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
 
   const openNewReport = () => {
     setEditingReport(null); setViewReport(null);
-    setRpTitle(''); setRpDate(new Date().toISOString().slice(0, 10));
+    setRpTitle(''); setRpDate(dateStr(new Date()));
     setRpCategory('会議議事録'); setRpParticipants(''); setRpExtParticipants(''); setRpContent('');
     setRpStatus('下書き'); setRpComment('');
+    setRpParticipantIds([]);
+    if (members.length === 0) fetchMembers();
     setReportModal(true);
   };
 
@@ -1290,37 +1669,155 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
     setRpTitle(r.title); setRpDate(r.report_date); setRpCategory(r.category);
     setRpParticipants(r.participants ?? ''); setRpExtParticipants(r.external_participants ?? ''); setRpContent(r.content);
     setRpStatus(r.status); setRpComment(r.comment ?? '');
+    // 既存の participants 文字列から名前を分割してメンバーIDに復元
+    const names = (r.participants ?? '').split(/[,、]/).map(s => s.trim()).filter(Boolean);
+    if (members.length === 0) fetchMembers();
+    setRpParticipantIds(members.filter(m => names.includes(m.display_name)).map(m => m.id));
     setReportModal(true);
   };
 
   const saveReport = async (asStatus: Report['status']) => {
     if (!rpTitle.trim()) { alert('タイトルを入力してください'); return; }
     setSavingReport(true);
+    // チェック選択されたメンバーから名前文字列を生成
+    const selectedMembers = members.filter(m => rpParticipantIds.includes(m.id));
+    const participantsText = selectedMembers.map(m => m.display_name).join(', ');
     const payload = {
       title: rpTitle.trim(), report_date: rpDate, category: rpCategory,
-      participants: rpParticipants.trim() || null, external_participants: rpExtParticipants.trim() || null, content: rpContent,
+      participants: participantsText || null, external_participants: rpExtParticipants.trim() || null, content: rpContent,
       status: asStatus, updated_at: new Date().toISOString(),
       ...(asStatus === '提出済' && !editingReport?.submitted_at ? { submitted_at: new Date().toISOString() } : {}),
     };
+    const payloadWithIds = { ...payload, participant_ids: rpParticipantIds };
+    let newReportId: string | null = null;
     if (editingReport) {
-      await supabase.from('reports').update(payload).eq('id', editingReport.id);
+      const { error: updErr } = await supabase.from('reports').update(payloadWithIds).eq('id', editingReport.id);
+      if (updErr) {
+        alert('報告書の更新に失敗しました: ' + updErr.message);
+        setSavingReport(false);
+        return;
+      }
     } else {
-      await supabase.from('reports').insert({ ...payload, author_id: currentUserId });
+      const { data: inserted, error: insErr } = await supabase.from('reports').insert({ ...payloadWithIds, author_id: currentUserId }).select('id').single();
+      if (insErr || !inserted) {
+        alert('報告書の保存に失敗しました: ' + (insErr?.message ?? 'unknown error'));
+        setSavingReport(false);
+        return;
+      }
+      newReportId = (inserted as any)?.id ?? null;
+    }
+    // Phase C: 新規作成時、author + participants 以外の全員に通知を作成
+    if (newReportId) {
+      const { data: allProfiles } = await supabase.from('profiles').select('id');
+      const excluded = new Set([currentUserId, ...rpParticipantIds]);
+      const notifRows = (allProfiles || [])
+        .map((p: any) => p.id)
+        .filter((id: string) => !excluded.has(id))
+        .map((rid: string) => ({ recipient_id: rid, report_id: newReportId }));
+      if (notifRows.length > 0) {
+        await supabase.from('report_notifications').insert(notifRows);
+      }
+    }
+    // 選択されたメンバー（自分以外）にメール送信
+    const targetIds = rpParticipantIds.filter(id => id !== currentUserId);
+    if (targetIds.length > 0) {
+      try {
+        const html = `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;">
+          <h2 style="color:#EC4899;">📝 ${rpCategory}が共有されました</h2>
+          <div style="background:#FDF2F8;border:1px solid #FBCFE8;border-radius:10px;padding:16px;margin:12px 0;">
+            <p style="font-size:18px;font-weight:bold;margin:0 0 8px;">${rpTitle.trim()}</p>
+            <p style="margin:4px 0;color:#475569;">📅 ${rpDate}</p>
+            ${participantsText ? `<p style="margin:4px 0;color:#475569;">👥 参加者: ${participantsText}</p>` : ''}
+            ${rpExtParticipants.trim() ? `<p style="margin:4px 0;color:#475569;">🤝 社外: ${rpExtParticipants.trim()}</p>` : ''}
+            <hr style="border:none;border-top:1px solid #FBCFE8;margin:12px 0;">
+            <pre style="white-space:pre-wrap;font-family:inherit;color:#334155;margin:0;">${(rpContent || '').replace(/</g,'&lt;').slice(0, 2000)}</pre>
+          </div>
+          <p style="color:#64748B;font-size:13px;">👤 ${myName || ''} さんから共有されました。<br>NexPortから詳細を確認してください。</p>
+        </div>`;
+        fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/send-email', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_ids: targetIds, email_subject: `【${rpCategory}】${rpTitle.trim()}`, email_body: html })
+        }).catch(() => {});
+      } catch (_) {}
     }
     setReportModal(false); await fetchReports();
     setSavingReport(false);
   };
 
+  const sendReportCommentEmail = (r: Report, comment: string, kind: 'comment' | 'approve' | 'reject') => {
+    if (!comment.trim()) return;
+    let participantIds: string[] = (r as any).participant_ids ?? [];
+    if (!participantIds.length && r.participants) {
+      const names = r.participants.split(/[,、]/).map(s => s.trim()).filter(Boolean);
+      participantIds = members.filter(m => names.includes(m.display_name)).map(m => m.id);
+    }
+    const recipients = Array.from(new Set([r.author_id, ...participantIds]))
+      .filter(id => id && id !== currentUserId);
+    if (recipients.length === 0) return;
+    const tag = kind === 'approve' ? '承認 + コメント' : kind === 'reject' ? '差戻し + コメント' : 'コメント';
+    const color = kind === 'approve' ? '#10B981' : kind === 'reject' ? '#F59E0B' : '#0EA5E9';
+    const html = `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;">
+      <h2 style="color:${color};">💬 報告書に${tag}が投稿されました</h2>
+      <div style="background:#F0F9FF;border:1px solid #BAE6FD;border-radius:10px;padding:16px;margin:12px 0;">
+        <p style="font-size:16px;font-weight:bold;margin:0 0 8px;">${r.title}</p>
+        <p style="margin:4px 0;color:#475569;">📅 ${r.report_date} / 📂 ${r.category}</p>
+        <hr style="border:none;border-top:1px solid #BAE6FD;margin:12px 0;">
+        <p style="margin:8px 0;color:#0C4A6E;"><strong>コメント:</strong></p>
+        <pre style="white-space:pre-wrap;font-family:inherit;color:#334155;margin:0;">${comment.replace(/</g,'&lt;').slice(0, 2000)}</pre>
+      </div>
+      <p style="color:#64748B;font-size:13px;">👤 ${myName || ''} さんがコメントしました。<br>NexPortから詳細を確認してください。</p>
+    </div>`;
+    fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/send-email', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_ids: recipients, email_subject: `【${tag}】${r.title}`, email_body: html })
+    }).catch(() => {});
+  };
+
   const approveReport = async (r: Report, newStatus: '承認済' | '差戻し', comment: string) => {
     await supabase.from('reports').update({
       status: newStatus, approved_by: currentUserId, approved_at: new Date().toISOString(),
-      comment: comment || null, updated_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     }).eq('id', r.id);
+    if (comment.trim()) {
+      await supabase.from('report_comments').insert({
+        report_id: r.id, author_id: currentUserId, content: comment.trim(),
+      });
+      sendReportCommentEmail(r, comment, newStatus === '承認済' ? 'approve' : 'reject');
+    }
     setViewReport(null); await fetchReports();
   };
 
+  const fetchReportComments = async (reportId: string) => {
+    const { data } = await supabase
+      .from('report_comments')
+      .select('*, profiles(display_name)')
+      .eq('report_id', reportId)
+      .order('created_at');
+    setReportComments(((data as any[]) ?? []).map((c: any) => ({
+      ...c,
+      profiles: Array.isArray(c.profiles) ? (c.profiles[0] ?? null) : c.profiles ?? null,
+    })) as ReportComment[]);
+  };
+
+  const addReportComment = async (r: Report, content: string) => {
+    if (!content.trim()) { alert('コメントを入力してください'); return; }
+    const { data, error } = await supabase
+      .from('report_comments')
+      .insert({ report_id: r.id, author_id: currentUserId, content: content.trim() })
+      .select('*, profiles(display_name)')
+      .single();
+    if (error) { alert('コメントの保存に失敗しました: ' + error.message); return; }
+    const inserted = data as any;
+    setReportComments(prev => [...prev, {
+      ...inserted,
+      profiles: Array.isArray(inserted.profiles) ? (inserted.profiles[0] ?? null) : inserted.profiles ?? null,
+    } as ReportComment]);
+    setRpComment('');
+    sendReportCommentEmail(r, content, 'comment');
+  };
+
   const deleteReport = async (r: Report) => {
-    if (!window.confirm(`「${r.title}」を削除しますか？`)) return;
+    if (!await confirmDialog(`「${r.title}」を削除しますか？`)) return;
     await supabase.from('reports').delete().eq('id', r.id);
     setViewReport(null); await fetchReports();
   };
@@ -1358,19 +1855,26 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
       from = `${y}-01-01`; to = `${y}-12-31`;
     }
     const [evRes, memRes] = await Promise.all([
-      supabase.from('schedule_events').select('*').gte('event_date', from).lte('event_date', to).order('start_time', { ascending: true, nullsFirst: true }),
-      supabase.from('profiles').select('id, display_name').eq('account_status', 'active').eq('employment_type', '社員').order('display_name'),
+      supabase.from('schedule_events').select('*').or(`and(event_date.gte.${from},event_date.lte.${to}),and(end_date.gte.${from},end_date.lte.${to}),and(event_date.lte.${from},end_date.gte.${from})`).order('start_time', { ascending: true, nullsFirst: true }),
+      supabase.from('profiles').select('id, display_name').eq('account_status', 'active').in('employment_type', ['社員', 'プランナー']).order('display_name'),
     ]);
     if (evRes.data) setSchedEvents(evRes.data as ScheduleEvent[]);
     if (memRes.data) setSchedMembers(memRes.data as Member[]);
     setLoadingSched(false);
   };
 
+  // イベントが指定日に含まれるかチェック（開始日〜終了日の範囲）
+  const evOnDate = (ev: ScheduleEvent, ds: string) => {
+    const end = ev.end_date || ev.event_date;
+    return ev.event_date <= ds && end >= ds;
+  };
+
   const openAddEvent = (userId?: string, date?: string) => {
     setEditingEvent(null);
-    setEvTitle(''); setEvType('その他'); setEvStart(''); setEvEnd(''); setEvMemo('');
+    setEvTitle(''); setEvType('その他'); setEvStart(''); setEvEnd(''); setEvMemo(''); setEvLocation('');
     setEvUserIds(userId ? [userId] : currentUserId ? [currentUserId] : []);
-    setEvDate(date || dateStr(schedNavDate));
+    const d = date || dateStr(schedNavDate);
+    setEvDate(d); setEvEndDate(d);
     setEventModal(true);
   };
 
@@ -1378,23 +1882,60 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
     setEditingEvent(ev);
     setEvTitle(ev.title); setEvType(ev.event_type);
     setEvStart(ev.start_time?.slice(0,5) || ''); setEvEnd(ev.end_time?.slice(0,5) || '');
-    setEvMemo(ev.memo || ''); setEvDate(ev.event_date); setEvUserIds([ev.user_id]);
+    setEvMemo(ev.memo || ''); setEvLocation(ev.location || ''); setEvDate(ev.event_date);
+    setEvEndDate(ev.end_date || ev.event_date);
+    setEvUserIds([ev.user_id]);
     setEventModal(true);
   };
 
   const saveEvent = async () => {
-    if (!evTitle.trim()) { alert('タイトルを入力してください'); return; }
+    const isHoliday = evType === '休み';
+    if (!isHoliday && !evTitle.trim()) { alert('タイトルを入力してください'); return; }
     if (evUserIds.length === 0) { alert('対象メンバーを1人以上選択してください'); return; }
+    if (evEndDate && evEndDate < evDate) { alert('終了日は開始日以降にしてください'); return; }
     setSavingEvent(true);
+    const effectiveTitle = evTitle.trim() || (isHoliday ? '休み' : '');
     const base = {
-      title: evTitle.trim(), event_date: evDate, event_type: evType,
+      title: effectiveTitle, event_date: evDate, end_date: evEndDate || evDate, event_type: evType,
       start_time: evStart || null, end_time: evEnd || null,
-      memo: evMemo.trim() || null, all_day: !evStart,
+      memo: evMemo.trim() || null, location: evLocation.trim() || null, all_day: !evStart,
     };
     if (editingEvent) {
-      await supabase.from('schedule_events').update({ ...base, user_id: evUserIds[0] }).eq('id', editingEvent.id);
+      // 編集時はstatus/assigned_byを維持
+      const { error: updateErr } = await supabase.from('schedule_events').update({ ...base, user_id: evUserIds[0] }).eq('id', editingEvent.id);
+      if (updateErr) { alert('予定の更新に失敗しました: ' + updateErr.message); setSavingEvent(false); return; }
     } else {
-      await supabase.from('schedule_events').insert(evUserIds.map(uid => ({ ...base, user_id: uid })));
+      const { error: insertErr } = await supabase.from('schedule_events').insert(evUserIds.map(uid => ({ ...base, user_id: uid, status: uid === currentUserId ? 'accepted' : 'pending', assigned_by: currentUserId })));
+      if (insertErr) { alert('予定の保存に失敗しました: ' + insertErr.message); setSavingEvent(false); return; }
+      // アサインされたメンバーにメール送信
+      try {
+        const targetIds = evUserIds.filter(uid => uid !== currentUserId);
+        if (targetIds.length > 0) {
+          const dateRange = evEndDate && evEndDate !== evDate ? `${evDate} 〜 ${evEndDate}` : evDate;
+          const timeStr = evStart ? `${evStart}${evEnd ? ' 〜 ' + evEnd : ''}` : '終日';
+          const html = `<div style="font-family:sans-serif;max-width:500px;margin:0 auto;">
+            <h2 style="color:#8B5CF6;">📅 予定のお知らせ</h2>
+            <div style="background:#FAF5FF;border:1px solid #E9D5FF;border-radius:10px;padding:16px;margin:12px 0;">
+              <p style="font-size:18px;font-weight:bold;margin:0 0 8px;">${base.title}</p>
+              <p style="margin:4px 0;color:#475569;">📆 ${dateRange}</p>
+              <p style="margin:4px 0;color:#475569;">🕐 ${timeStr}</p>
+              ${base.location ? `<p style="margin:4px 0;color:#475569;">📍 ${base.location}</p>` : ''}
+              <p style="margin:4px 0;color:#475569;">種別: ${base.event_type}</p>
+              ${base.memo ? `<p style="margin:8px 0;color:#334155;">${base.memo}</p>` : ''}
+            </div>
+            <p style="color:#64748B;font-size:13px;">👤 ${myName || '管理者'} さんからのアサインです。<br>NexPortにログインして承認・拒否してください。</p>
+          </div>`;
+          fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/send-email', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_ids: targetIds, email_subject: `【予定】${base.title} - ${dateRange}`, email_body: html })
+          }).catch(() => {});
+          // プッシュ通知も送信
+          fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/web-push', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'send', user_ids: targetIds, title: '📅 予定のお知らせ', body: `${base.title} (${dateRange})` })
+          }).catch(() => {});
+        }
+      } catch (_) {}
     }
     setEventModal(false);
     await fetchSchedule();
@@ -1402,10 +1943,89 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   };
 
   const deleteEvent = async (ev: ScheduleEvent) => {
-    if (!window.confirm(`「${ev.title}」を削除しますか？`)) return;
+    if (!await confirmDialog(`「${ev.title}」を削除しますか？`)) return;
     await supabase.from('schedule_events').delete().eq('id', ev.id);
     setSchedEvents(prev => prev.filter(e => e.id !== ev.id));
   };
+
+  const toggleCompleteEvent = async (ev: ScheduleEvent) => {
+    const nowIso = ev.completed_at ? null : new Date().toISOString();
+    const { error } = await supabase.from('schedule_events').update({ completed_at: nowIso }).eq('id', ev.id);
+    if (error) { alert('完了状態の更新に失敗: ' + error.message); return; }
+    setSchedEvents(prev => prev.map(e => e.id === ev.id ? { ...e, completed_at: nowIso } : e));
+    setEditingEvent(prev => prev && prev.id === ev.id ? { ...prev, completed_at: nowIso } : prev);
+  };
+
+  // ═══════════════════════════════════════════════════════════
+  // 倉庫レイアウト
+  // ═══════════════════════════════════════════════════════════
+  if (screen === 'layout') {
+    return <LayoutEditorScreen onBack={() => setScreen('portal')} currentUserId={currentUserId} />;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // エリア地図 (プレゼン資料用)
+  // ═══════════════════════════════════════════════════════════
+  if (screen === 'areamap') {
+    return <AreaMapScreen onBack={() => setScreen('portal')} currentUserId={currentUserId} />;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 収支 (新聞シフト管理ツール 連携)
+  // ═══════════════════════════════════════════════════════════
+  if (screen === 'balance') {
+    return <BusinessBalanceScreen onBack={() => setScreen('portal')} />;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 現場運用ツール
+  // ═══════════════════════════════════════════════════════════
+  if (screen === 'fieldtools') {
+    const FIELD_TOOLS: { title: string; desc: string; url: string; icon: string; color: string }[] = [
+      { title: '新聞管理ツール', desc: '配送シフト・請求書・収支管理・GPS測定', url: 'https://neltecsystem-tech.github.io/shift-manager/', icon: '📰', color: '#3B82F6' },
+      { title: 'アスクル管理ツール', desc: '配送実績・コース割・請求/支払明細', url: 'https://neltecsystem-tech.github.io/askul-manager/', icon: '📦', color: '#F59E0B' },
+    ];
+    return (
+      <View style={styles.container}>
+        {renderHeader('🛠️ 現場運用ツール')}
+        <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 40, gap: 12 }}>
+          {FIELD_TOOLS.map((t) => (
+            <TouchableOpacity
+              key={t.url}
+              onPress={() => Linking.openURL(t.url).catch(() => alert('URLを開けませんでした'))}
+              style={{
+                backgroundColor: '#fff',
+                borderRadius: 14,
+                padding: 18,
+                borderWidth: 1,
+                borderColor: '#E2E8F0',
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 14,
+              }}
+            >
+              <View style={{ width: 56, height: 56, borderRadius: 14, backgroundColor: t.color + '18', alignItems: 'center', justifyContent: 'center' }}>
+                <Text style={{ fontSize: 28 }}>{t.icon}</Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 17, fontWeight: '700', color: '#0F172A', marginBottom: 4 }}>{t.title}</Text>
+                <Text style={{ fontSize: 12, color: '#64748B', marginBottom: 4 }}>{t.desc}</Text>
+                <Text style={{ fontSize: 11, color: '#94A3B8' }} numberOfLines={1}>{t.url.replace(/^https?:\/\//, '')}</Text>
+              </View>
+              <Text style={{ fontSize: 20, color: t.color }}>›</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 見積書 / 発注書
+  // ═══════════════════════════════════════════════════════════
+  if (screen === 'quotation') {
+    return <QuotationOrderScreen onBack={() => setScreen('portal')} currentUserId={currentUserId} />;
+  }
 
   // ═══════════════════════════════════════════════════════════
   // PORTAL
@@ -1429,7 +2049,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
         </View>
 
         {/* アイコンナビゲーション */}
-        <View style={styles.navGrid}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.navGridScroll} contentContainerStyle={styles.navGrid}>
           {NAV_ITEMS.map(item => (
             <TouchableOpacity key={item.key} style={styles.navItem} onPress={() => setScreen(item.key)}>
               <View style={[styles.navIconBox, { backgroundColor: item.color + '18' }]}>
@@ -1438,12 +2058,96 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
               <Text style={styles.navLabel}>{item.label}</Text>
             </TouchableOpacity>
           ))}
-        </View>
+        </ScrollView>
 
         {portalLoading
           ? <ActivityIndicator style={{ marginTop: 60 }} color="#1E3A5F" size="large" />
           : (
           <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.portalScroll} showsVerticalScrollIndicator={false}>
+
+            {/* 物流ニュース 1行マーキー表示 (LNEWS RSS + 西武1件, CSS無限ループ) */}
+            {logisticsItems.length > 0 && (() => {
+              const top6 = logisticsItems.slice(0, 6);
+              // 西武を1件だけ、真ん中（3件目）に配置 → スクロール中央で目立つ
+              const newsItems = (() => {
+                const seibu = top6.find(it => it.source === '西武ライオンズ');
+                const others = top6.filter(it => it.source !== '西武ライオンズ');
+                if (!seibu) return top6;
+                const insertAt = Math.min(2, others.length);
+                return [...others.slice(0, insertAt), seibu, ...others.slice(insertAt)].slice(0, 6);
+              })();
+              const doubled = [...newsItems, ...newsItems]; // シームレスループ用に2セット連結
+              const HEADER_HEIGHT = 28;
+              const LINE_HEIGHT = 38;
+              const durationSec = Math.max(15, newsItems.length * 3);
+              return (
+                <View style={[styles.widget, { padding: 0, overflow: 'hidden', backgroundColor: '#0F172A' }]}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, height: HEADER_HEIGHT, backgroundColor: 'rgba(15,23,42,0.95)' }}>
+                    <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>📰 物流ニュース ＋ ⚾ プロ野球（西武）</Text>
+                    <Text style={{ color: '#94A3B8', fontSize: 11, marginLeft: 'auto' }}>LNEWS / 西武ライオンズ · 厳選{newsItems.length}件</Text>
+                  </View>
+                  <View style={{ height: LINE_HEIGHT, justifyContent: 'center', overflow: 'hidden' }}>
+                    {Platform.OS === 'web' ? (
+                      // @ts-ignore - web専用 div + CSS animation
+                      <div
+                        className="nx-news-marquee-inner"
+                        style={{ ['--nx-marquee-duration' as any]: `${durationSec}s` } as any}
+                      >
+                        {doubled.map((item, i) => {
+                          const isSeibu = item.source === '西武ライオンズ';
+                          return (
+                            <TouchableOpacity key={i} onPress={() => Linking.openURL(item.link).catch(() => {})} style={{ flexDirection: 'row', alignItems: 'center', paddingRight: 32 }}>
+                              {isSeibu ? (
+                                <View style={{ backgroundColor: '#1D4ED8', paddingHorizontal: 10, paddingVertical: 3, borderRadius: 12, marginHorizontal: 4 }}>
+                                  <Text style={{ color: '#fff', fontSize: 12, fontWeight: '800' }}>⚾ 西武LIONS</Text>
+                                </View>
+                              ) : (
+                                <Text style={{ color: '#fbbf24', fontSize: 14, marginHorizontal: 4 }}>●</Text>
+                              )}
+                              <Text style={{
+                                color: isSeibu ? '#FCD34D' : '#fff',
+                                fontSize: isSeibu ? 17 : 16,
+                                fontWeight: isSeibu ? '700' : '600',
+                                textShadowColor: 'rgba(0,0,0,0.7)',
+                                textShadowOffset: { width: 1, height: 1 },
+                                textShadowRadius: 2,
+                                ...({ whiteSpace: 'nowrap' } as any),
+                              }}>
+                                {item.title}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ alignItems: 'center' }}>
+                        {newsItems.map((item, i) => {
+                          const isSeibu = item.source === '西武ライオンズ';
+                          return (
+                            <TouchableOpacity key={i} onPress={() => Linking.openURL(item.link).catch(() => {})} style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12 }}>
+                              {isSeibu ? (
+                                <View style={{ backgroundColor: '#1D4ED8', paddingHorizontal: 10, paddingVertical: 3, borderRadius: 12, marginRight: 6 }}>
+                                  <Text style={{ color: '#fff', fontSize: 12, fontWeight: '800' }}>⚾ 西武LIONS</Text>
+                                </View>
+                              ) : (
+                                <Text style={{ color: '#fbbf24', fontSize: 14, marginRight: 6 }}>●</Text>
+                              )}
+                              <Text numberOfLines={1} style={{
+                                color: isSeibu ? '#FCD34D' : '#fff',
+                                fontSize: isSeibu ? 15 : 14,
+                                fontWeight: isSeibu ? '700' : '600',
+                              }}>
+                                {item.title}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </ScrollView>
+                    )}
+                  </View>
+                </View>
+              );
+            })()}
 
             {/* 連絡（ピン留め投稿） */}
             {pinnedPost && (
@@ -1460,6 +2164,128 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                   <Text style={styles.pinnedContent} numberOfLines={2}>{pinnedPost.content}</Text>
                   <Text style={styles.pinnedMeta}>{pinnedPost.profiles?.display_name} · {fmtTime(pinnedPost.created_at)}</Text>
                 </TouchableOpacity>
+              </View>
+            )}
+
+            {/* 車検アラート */}
+            {(() => {
+              const now = new Date();
+              const alertVehicles = vehicles.filter(v => {
+                if (!v.inspection_expiry) return false;
+                const exp = new Date(v.inspection_expiry);
+                const diff = (exp.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
+                return diff < 30;
+              }).sort((a: any, b: any) => new Date(a.inspection_expiry).getTime() - new Date(b.inspection_expiry).getTime());
+
+              return alertVehicles.length > 0 ? (
+                <View style={[styles.widget, { borderLeftWidth: 4, borderLeftColor: '#EF4444' }]}>
+                  <View style={styles.widgetHeader}>
+                    <Text style={styles.widgetIcon}>🚨</Text>
+                    <Text style={[styles.widgetTitle, { color: '#EF4444' }]}>車検アラート</Text>
+                    <TouchableOpacity onPress={() => setScreen('vehicles')} style={styles.widgetMore}>
+                      <Text style={styles.widgetMoreText}>一覧→</Text>
+                    </TouchableOpacity>
+                  </View>
+                  {alertVehicles.map((v: any, i: number) => {
+                    const exp = new Date(v.inspection_expiry);
+                    const diff = Math.ceil((exp.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+                    const isExpired = diff < 0;
+                    return (
+                      <TouchableOpacity key={i} onPress={() => { setVehicleDetail(v); setScreen('vehicles'); }}
+                        style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: i < alertVehicles.length - 1 ? 1 : 0, borderBottomColor: '#F1F5F9' }}>
+                        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: isExpired ? '#EF4444' : '#F59E0B', marginRight: 10 }} />
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontSize: 14, fontWeight: '600', color: '#1E293B' }}>{v.maker} {v.car_name}  <Text style={{ fontSize: 12, color: '#64748B', fontWeight: 'normal' }}>{v.number}</Text></Text>
+                          <Text style={{ fontSize: 12, color: '#94A3B8' }}>👤 {v.name || v.owner || '-'}</Text>
+                        </View>
+                        <View style={{ alignItems: 'flex-end' }}>
+                          <Text style={{ fontSize: 12, fontWeight: 'bold', color: isExpired ? '#EF4444' : '#F59E0B' }}>
+                            {isExpired ? `${Math.abs(diff)}日超過` : `残り${diff}日`}
+                          </Text>
+                          <Text style={{ fontSize: 11, color: '#94A3B8' }}>{v.inspection_expiry}</Text>
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              ) : null;
+            })()}
+
+            {/* 契約書対応アラート */}
+            {(() => {
+              const pendingContracts = interviews.filter(r => {
+                const cs = r.contract_status ?? '';
+                if (cs.includes('依頼') || cs.includes('更新（社内')) return true;
+                // 採用かつ契約書未着手
+                if (r.interview_result === '採用' && !cs) return true;
+                return false;
+              });
+              return pendingContracts.length > 0 ? (
+                <View style={[styles.widget, { borderLeftWidth: 4, borderLeftColor: '#3B82F6' }]}>
+                  <View style={styles.widgetHeader}>
+                    <Text style={styles.widgetIcon}>📋</Text>
+                    <Text style={[styles.widgetTitle, { color: '#3B82F6' }]}>契約書対応</Text>
+                    <TouchableOpacity onPress={() => setScreen('interviews')} style={styles.widgetMore}>
+                      <Text style={styles.widgetMoreText}>一覧→</Text>
+                    </TouchableOpacity>
+                  </View>
+                  {pendingContracts.slice(0, 5).map((r: any, i: number) => {
+                    const cs = r.contract_status ?? '';
+                    const kind = !cs ? 'none' : cs.includes('依頼') ? 'request' : 'update';
+                    const labelText = kind === 'none' ? '未着手' : kind === 'request' ? '依頼' : '更新';
+                    const bg = kind === 'none' ? '#FEE2E2' : kind === 'request' ? '#DBEAFE' : '#FEF3C7';
+                    const fg = kind === 'none' ? '#DC2626' : kind === 'request' ? '#1D4ED8' : '#D97706';
+                    return (
+                      <TouchableOpacity key={i} onPress={() => { setInterviewDetail(r); setScreen('interviews'); }}
+                        style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 8, borderBottomWidth: i < Math.min(pendingContracts.length, 5) - 1 ? 1 : 0, borderBottomColor: '#F1F5F9' }}>
+                        <View style={{ backgroundColor: bg, borderRadius: 6, paddingHorizontal: 8, paddingVertical: 2, marginRight: 10 }}>
+                          <Text style={{ fontSize: 11, fontWeight: 'bold', color: fg }}>{labelText}</Text>
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontSize: 14, fontWeight: '600', color: '#1E293B' }}>{r.name}</Text>
+                        </View>
+                        <Text style={{ fontSize: 12, color: '#94A3B8' }}>{cs || '契約書未着手'}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                  {pendingContracts.length > 5 && (
+                    <Text style={{ fontSize: 12, color: '#94A3B8', marginTop: 4 }}>他 {pendingContracts.length - 5}件</Text>
+                  )}
+                </View>
+              ) : null;
+            })()}
+
+            {/* 予定アサイン通知 */}
+            {pendingEvents.length > 0 && (
+              <View style={[styles.widget, { borderLeftWidth: 4, borderLeftColor: '#8B5CF6' }]}>
+                <View style={styles.widgetHeader}>
+                  <Text style={styles.widgetIcon}>📅</Text>
+                  <Text style={styles.widgetTitle}>予定のお知らせ</Text>
+                  <Text style={{ marginLeft: 'auto', backgroundColor: '#8B5CF6', color: '#fff', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2, fontSize: 12, fontWeight: 'bold' }}>{pendingEvents.length}</Text>
+                </View>
+                {pendingEvents.map(ev => (
+                  <View key={ev.id} style={{ backgroundColor: '#FAF5FF', borderRadius: 10, padding: 12, marginTop: 8, borderWidth: 1, borderColor: '#E9D5FF' }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
+                      <Text style={{ fontSize: 14, fontWeight: 'bold', color: '#1E293B', flex: 1 }}>{ev.title}</Text>
+                      <Text style={{ fontSize: 11, color: '#8B5CF6', fontWeight: '600' }}>{ev.event_type}</Text>
+                    </View>
+                    <Text style={{ fontSize: 12, color: '#64748B', marginBottom: 2 }}>
+                      📆 {ev.event_date}{ev.end_date && ev.end_date !== ev.event_date ? ` 〜 ${ev.end_date}` : ''}
+                      {ev.start_time ? ` ${ev.start_time.slice(0,5)}` : ''}
+                      {ev.end_time ? `〜${ev.end_time.slice(0,5)}` : ''}
+                    </Text>
+                    {ev.assigner_name ? <Text style={{ fontSize: 11, color: '#94A3B8', marginBottom: 6 }}>👤 {ev.assigner_name} さんからのアサイン</Text> : null}
+                    {ev.memo ? <Text style={{ fontSize: 12, color: '#475569', marginBottom: 6 }}>{ev.memo}</Text> : null}
+                    <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
+                      <TouchableOpacity onPress={() => respondEvent(ev.id, 'accepted')} style={{ flex: 1, backgroundColor: '#22C55E', borderRadius: 8, padding: 10, alignItems: 'center' }}>
+                        <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 14 }}>✓ 承認</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={() => respondEvent(ev.id, 'declined')} style={{ flex: 1, backgroundColor: '#EF4444', borderRadius: 8, padding: 10, alignItems: 'center' }}>
+                        <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 14 }}>✕ 拒否</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ))}
               </View>
             )}
 
@@ -1538,6 +2364,54 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                   ))
                 }
               </View>
+            </View>
+
+            {/* 新着報告書 (24h以内) */}
+            <View style={[styles.widget, recentReports.length > 0 && { borderColor: '#FCA5A5', borderWidth: 1.5, backgroundColor: '#FEF2F2' }]}>
+              <View style={styles.widgetHeader}>
+                <Text style={styles.widgetIcon}>📝</Text>
+                <Text style={styles.widgetTitle}>新着報告書</Text>
+                {recentReports.length > 0 && (
+                  <View style={{ backgroundColor: '#EF4444', borderRadius: 10, paddingHorizontal: 7, paddingVertical: 2, marginLeft: 6, minWidth: 22, alignItems: 'center' }}>
+                    <Text style={{ color: '#fff', fontSize: 11, fontWeight: '700' }}>{recentReports.length}</Text>
+                  </View>
+                )}
+                <Text style={{ fontSize: 11, color: '#94A3B8', marginLeft: 8 }}>(24h以内 / 未確認)</Text>
+                <TouchableOpacity onPress={() => setScreen('reports')} style={styles.widgetMore}>
+                  <Text style={styles.widgetMoreText}>一覧 ›</Text>
+                </TouchableOpacity>
+              </View>
+              {recentReports.length === 0
+                ? <Text style={styles.emptySmall}>新着なし</Text>
+                : recentReports.map(r => (
+                  <TouchableOpacity
+                    key={r.id}
+                    style={styles.infoItem}
+                    onPress={async () => {
+                      if (r._notifId) await dismissReportNotif(r._notifId);
+                      setRecentReports(prev => prev.filter(p => p.id !== r.id));
+                      setScreen('reports');
+                      setViewReport(r);
+                      setRpComment('');
+                      setReportComments([]);
+                      fetchReportComments(r.id);
+                    }}
+                  >
+                    <View style={[styles.categoryDot, { backgroundColor: r.status === '提出済' ? '#F59E0B' : r.status === '承認済' ? '#10B981' : r.status === '差戻し' ? '#EF4444' : '#9CA3AF' }]} />
+                    <View style={{ flex: 1 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <Text style={[styles.infoItemTitle, { flex: 1 }]} numberOfLines={1}>{r.title}</Text>
+                        {r._notifId && (
+                          <View style={{ backgroundColor: '#F59E0B', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 }}>
+                            <Text style={{ color: '#fff', fontSize: 10, fontWeight: '700' }}>未確認</Text>
+                          </View>
+                        )}
+                      </View>
+                      <Text style={styles.infoItemSub}>{r.profiles?.display_name ?? '不明'} · {r.status} · {fmtTime(r.created_at)}</Text>
+                    </View>
+                  </TouchableOpacity>
+                ))
+              }
             </View>
 
             {/* ToDoリスト */}
@@ -1750,7 +2624,12 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                       <View style={[styles.statusPill, { backgroundColor: STATUS_COLOR[item.status] + '22' }]}>
                         <Text style={[styles.statusPillText, { color: STATUS_COLOR[item.status] }]}>{item.status}</Text>
                       </View>
-                      <Text style={styles.taskAssignText}>👤 {(item.assignee as any)?.display_name ?? '未割当'}</Text>
+                      <Text style={styles.taskAssignText}>👤 {(() => {
+                        const ids = item.assignee_ids?.length ? item.assignee_ids : (item.assigned_to ? [item.assigned_to] : []);
+                        if (ids.length === 0) return '未割当';
+                        const names = ids.map(id => members.find(m => m.id === id)?.display_name).filter(Boolean) as string[];
+                        return names.length > 0 ? names.join(' / ') : '未割当';
+                      })()}</Text>
                       {item.due_date && (
                         <Text style={[styles.taskDueText, new Date(item.due_date) < new Date() && item.status !== '完了' && styles.taskOverdueText]}>
                           📅 {item.due_date}
@@ -1788,18 +2667,37 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                   </TouchableOpacity>
                 ))}
               </View>
-              <Text style={styles.fLabel}>期限 (YYYY-MM-DD)</Text>
-              <TextInput style={styles.fInput} value={taskDue} onChangeText={setTaskDue} placeholder="例: 2026-04-30" keyboardType="numbers-and-punctuation" />
-              <Text style={styles.fLabel}>担当者</Text>
+              <Text style={styles.fLabel}>期限</Text>
+              {/* @ts-ignore Web only */}
+              <input
+                type="date"
+                value={taskDue}
+                onChange={(e: any) => setTaskDue(e.target.value)}
+                style={{
+                  padding: 10,
+                  fontSize: 14,
+                  borderRadius: 8,
+                  border: '1px solid #E5E7EB',
+                  backgroundColor: '#fff',
+                  color: '#111827',
+                  marginBottom: 12,
+                  fontFamily: 'inherit',
+                }}
+              />
+              <Text style={styles.fLabel}>担当者 (複数選択可)</Text>
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 16 }}>
-                <TouchableOpacity style={[styles.assignChip, taskAssignee === null && styles.assignChipActive]} onPress={() => setTaskAssignee(null)}>
-                  <Text style={[styles.assignChipText, taskAssignee === null && styles.assignChipTextActive]}>未割当</Text>
-                </TouchableOpacity>
-                {members.map(m => (
-                  <TouchableOpacity key={m.id} style={[styles.assignChip, taskAssignee === m.id && styles.assignChipActive]} onPress={() => setTaskAssignee(m.id)}>
-                    <Text style={[styles.assignChipText, taskAssignee === m.id && styles.assignChipTextActive]}>{m.display_name}</Text>
-                  </TouchableOpacity>
-                ))}
+                {members.map(m => {
+                  const sel = taskAssigneeIds.includes(m.id);
+                  return (
+                    <TouchableOpacity
+                      key={m.id}
+                      style={[styles.assignChip, sel && styles.assignChipActive]}
+                      onPress={() => setTaskAssigneeIds(prev => prev.includes(m.id) ? prev.filter(x => x !== m.id) : [...prev, m.id])}
+                    >
+                      <Text style={[styles.assignChipText, sel && styles.assignChipTextActive]}>{sel ? '✓ ' : ''}{m.display_name}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
               </ScrollView>
               <View style={styles.modalBtns}>
                 <TouchableOpacity style={styles.cancelBtn} onPress={() => setTaskModal(false)}><Text style={styles.cancelBtnText}>キャンセル</Text></TouchableOpacity>
@@ -1917,8 +2815,8 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
             {schedView === 'day' && (() => {
               const ds = dateStr(schedNavDate);
               const HOUR_W = 80;
-              const allDayEvs = filteredEvents.filter(e => e.event_date === ds && !e.start_time);
-              const timedEvs = filteredEvents.filter(e => e.event_date === ds && e.start_time);
+              const allDayEvs = filteredEvents.filter(e => evOnDate(e, ds) && !e.start_time);
+              const timedEvs = filteredEvents.filter(e => evOnDate(e, ds) && e.start_time);
               const ROW_H = 56;
               return (
                 <ScrollView style={{ flex: 1 }}>
@@ -1930,10 +2828,11 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                         {allDayEvs.map(ev => {
                           const c = EVENT_TYPE_COLORS[ev.event_type];
                           const memberName = filteredMembers.find(m => m.id === ev.user_id)?.display_name ?? '';
+                          const done = !!ev.completed_at;
                           return (
-                            <TouchableOpacity key={ev.id} style={[styles.dayAllDayChip, { backgroundColor: c.bg, borderColor: c.border }]} onPress={() => openEditEvent(ev)}>
-                              <Text style={{ fontSize: 12, color: c.text, fontWeight: '600' }} numberOfLines={1}>
-                                {schedFilterUser === 'all' ? `[${memberName}] ` : ''}{ev.title}
+                            <TouchableOpacity key={ev.id} style={[styles.dayAllDayChip, { backgroundColor: c.bg, borderColor: c.border }, done && { opacity: 0.5 }]} onPress={() => openEditEvent(ev)}>
+                              <Text style={{ fontSize: 12, color: c.text, fontWeight: '600', textDecorationLine: done ? 'line-through' : 'none' }} numberOfLines={1}>
+                                {done ? '✅ ' : ''}{schedFilterUser === 'all' ? `[${memberName}] ` : ''}{ev.title}
                               </Text>
                             </TouchableOpacity>
                           );
@@ -1976,15 +2875,16 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                                 const [eh, em] = (ev.end_time ?? `${sh + 1}:00`).split(':').map(Number);
                                 const left = (sh + sm / 60) * HOUR_W;
                                 const width = Math.max(((eh - sh) * 60 + (em - sm)) / 60 * HOUR_W, 40);
+                                const done = !!ev.completed_at;
                                 return (
                                   <TouchableOpacity key={ev.id}
-                                    style={[styles.dayHBar, { left, width, backgroundColor: c.bg, borderColor: c.border }]}
+                                    style={[styles.dayHBar, { left, width, backgroundColor: c.bg, borderColor: c.border }, done && { opacity: 0.5 }]}
                                     onPress={() => openEditEvent(ev)}
                                   >
                                     <Text style={{ fontSize: 10, color: c.text, fontWeight: '600' }} numberOfLines={1}>
                                       {ev.start_time?.slice(0,5)}-{ev.end_time?.slice(0,5)}
                                     </Text>
-                                    <Text style={{ fontSize: 11, color: c.text, fontWeight: '700' }} numberOfLines={1}>{ev.title}</Text>
+                                    <Text style={{ fontSize: 11, color: c.text, fontWeight: '700', textDecorationLine: done ? 'line-through' : 'none' }} numberOfLines={1}>{done ? '✅ ' : ''}{ev.title}</Text>
                                   </TouchableOpacity>
                                 );
                               })}
@@ -2007,26 +2907,55 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                   <ScrollView horizontal showsHorizontalScrollIndicator>
                     <View>
                       <View style={styles.schedHeaderRow}>
-                        <View style={styles.schedMemberCell}><Text style={styles.schedMemberHeader}>メンバー</Text></View>
-                        {weekDays.map((day, i) => (
-                          <View key={i} style={[styles.schedDayHeader, isToday(day) && styles.schedDayHeaderToday]}>
-                            <Text style={[styles.schedDayName, i === 5 && { color: '#3B82F6' }, i === 6 && { color: '#EF4444' }, isToday(day) && { color: '#fff' }]}>{DAY_NAMES[day.getDay()]}</Text>
-                            <Text style={[styles.schedDayDate, isToday(day) && { color: '#fff' }]}>{day.getDate()}</Text>
+                        <View style={[styles.schedMemberCell, { backgroundColor: '#F8FAFC' }]}><Text style={styles.schedMemberHeader}>メンバー</Text></View>
+                        {weekDays.map((day, i) => {
+                          const hol = isHoliday(day);
+                          return (
+                          <View key={i} style={[styles.schedDayHeader, isToday(day) && styles.schedDayHeaderToday, hol && !isToday(day) && { backgroundColor: '#FFF1F2' }]}>
+                            <Text style={[styles.schedDayName, i === 5 && { color: '#3B82F6' }, i === 6 && { color: '#EF4444' }, hol && { color: '#EF4444' }, isToday(day) && { color: '#fff' }]}>{DAY_NAMES[day.getDay()]}</Text>
+                            <Text style={[styles.schedDayDate, hol && !isToday(day) && { color: '#EF4444' }, isToday(day) && { color: '#fff' }]}>{day.getDate()}</Text>
+                            {hol && <Text style={{ fontSize: 9, color: '#DC2626', textAlign: 'center' }} numberOfLines={1}>{hol}</Text>}
                           </View>
-                        ))}
+                          );})}
                       </View>
-                      {filteredMembers.map(member => (
-                        <View key={member.id} style={styles.schedMemberRow}>
+                      {filteredMembers.map(member => {
+                        const memberEvs = filteredEvents.filter(e => e.user_id === member.id);
+                        // 複数日イベントの表示済みID
+                        const renderedMultiDay = new Set<string>();
+                        return (
+                        <View key={member.id} style={[styles.schedMemberRow, { position: 'relative' }]}>
                           <View style={styles.schedMemberCell}><Text style={styles.schedMemberName} numberOfLines={2}>{member.display_name}</Text></View>
                           {weekDays.map((day, i) => {
-                            const dayEvs = filteredEvents.filter(e => e.user_id === member.id && e.event_date === dateStr(day));
+                            const ds = dateStr(day);
+                            const dayEvs = memberEvs.filter(e => evOnDate(e, ds));
+                            const hol = isHoliday(day);
                             return (
-                              <TouchableOpacity key={i} style={[styles.schedDayCell, isToday(day) && styles.schedDayCellToday, i === 5 && { backgroundColor: '#F8FAFF' }, i === 6 && { backgroundColor: '#FFF8F8' }]} onPress={() => openAddEvent(member.id, dateStr(day))}>
+                              <TouchableOpacity key={i} style={[styles.schedDayCell, isToday(day) && styles.schedDayCellToday, i === 5 && { backgroundColor: '#F8FAFF' }, i === 6 && { backgroundColor: '#FFF8F8' }, hol && !isToday(day) && { backgroundColor: '#FFF1F2' }]} onPress={() => openAddEvent(member.id, ds)}>
                                 {dayEvs.map(ev => {
                                   const c = EVENT_TYPE_COLORS[ev.event_type];
+                                  const endD = ev.end_date || ev.event_date;
+                                  const isMulti = endD > ev.event_date;
+                                  const done = !!ev.completed_at;
+                                  // 複数日: 開始日or週の最初の日のみ表示
+                                  if (isMulti) {
+                                    if (renderedMultiDay.has(ev.id)) return null;
+                                    renderedMultiDay.add(ev.id);
+                                    // この週で何日分か計算
+                                    const startIdx = Math.max(0, weekDays.findIndex(wd => dateStr(wd) >= ev.event_date));
+                                    const endIdx = Math.min(6, weekDays.findIndex(wd => dateStr(wd) >= endD));
+                                    const spanDays = (endIdx >= 0 ? endIdx : 6) - i + 1;
+                                    return (
+                                      <TouchableOpacity key={ev.id} style={[{ backgroundColor: c.bg, borderColor: c.border, borderWidth: 1, borderRadius: 4, padding: 3, marginBottom: 2, width: spanDays * 130 - 8, zIndex: 5 }, done && { opacity: 0.5 }]} onPress={(e) => { (e as any).stopPropagation?.(); openEditEvent(ev); }}>
+                                        <Text style={[styles.schedEventChipText, { color: c.text, textDecorationLine: done ? 'line-through' : 'none' }]} numberOfLines={1}>
+                                          {done ? '✅ ' : ''}{ev.event_date.slice(5)}〜{endD.slice(5)} {ev.title}
+                                        </Text>
+                                      </TouchableOpacity>
+                                    );
+                                  }
                                   return (
-                                    <TouchableOpacity key={ev.id} style={[styles.schedEventChip, { backgroundColor: c.bg, borderColor: c.border }]} onPress={(e) => { (e as any).stopPropagation?.(); openEditEvent(ev); }}>
-                                      <Text style={[styles.schedEventChipText, { color: c.text }]} numberOfLines={2}>
+                                    <TouchableOpacity key={ev.id} style={[styles.schedEventChip, { backgroundColor: c.bg, borderColor: c.border }, done && { opacity: 0.5 }]} onPress={(e) => { (e as any).stopPropagation?.(); openEditEvent(ev); }}>
+                                      <Text style={[styles.schedEventChipText, { color: c.text, textDecorationLine: done ? 'line-through' : 'none' }]} numberOfLines={3}>
+                                        {done ? '✅ ' : ev.status === 'accepted' ? '✓ ' : ev.status === 'declined' ? '✕ ' : ev.status === 'pending' && ev.assigned_by !== ev.user_id ? '⏳ ' : ''}
                                         {ev.start_time ? `${ev.start_time.slice(0,5)}${ev.end_time ? `-${ev.end_time.slice(0,5)}` : ''}\n` : ''}
                                         {ev.title}
                                       </Text>
@@ -2038,7 +2967,8 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                             );
                           })}
                         </View>
-                      ))}
+                        );
+                      })}
                     </View>
                   </ScrollView>
 
@@ -2061,13 +2991,13 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                               const c = EVENT_TYPE_COLORS[ev.event_type];
                               const d = new Date(ev.event_date + 'T00:00:00');
                               return (
-                                <TouchableOpacity key={ev.id} style={[styles.listBoxItem, { borderLeftColor: c.border }]} onPress={() => openEditEvent(ev)}>
+                                <TouchableOpacity key={ev.id} style={[styles.listBoxItem, { borderLeftColor: c.border }, ev.completed_at && { opacity: 0.5 }]} onPress={() => openEditEvent(ev)}>
                                   <View style={styles.listBoxDateCol}>
                                     <Text style={styles.listBoxDateNum}>{d.getDate()}</Text>
                                     <Text style={styles.listBoxDateDay}>{DAY_NAMES[d.getDay()]}</Text>
                                   </View>
                                   <View style={{ flex: 1 }}>
-                                    <Text style={styles.listBoxItemTitle} numberOfLines={1}>{ev.title}</Text>
+                                    <Text style={[styles.listBoxItemTitle, ev.completed_at && { textDecorationLine: 'line-through' }]} numberOfLines={1}>{ev.completed_at ? '✅ ' : ''}{ev.title}</Text>
                                     <Text style={styles.listBoxItemTime}>
                                       {ev.start_time ? `${ev.start_time.slice(0,5)}${ev.end_time ? ` 〜 ${ev.end_time.slice(0,5)}` : ''}` : '終日'}
                                     </Text>
@@ -2113,16 +3043,19 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                       {row.map((day, ci) => {
                         if (!day) return <View key={ci} style={styles.monthCell} />;
                         const ds = `${y}-${String(m+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
-                        const dayEvs = filteredEvents.filter(e => e.event_date === ds);
+                        const dayEvs = filteredEvents.filter(e => evOnDate(e, ds));
                         const today = ds === dateStr(new Date());
+                        const hol = isHoliday(new Date(ds + 'T00:00:00'));
                         return (
-                          <TouchableOpacity key={ci} style={[styles.monthCell, today && styles.monthCellToday]} onPress={() => openAddEvent(undefined, ds)}>
-                            <Text style={[styles.monthCellDate, today && styles.monthCellDateToday, ci === 0 && !today && { color: '#EF4444' }, ci === 6 && !today && { color: '#3B82F6' }]}>{day}</Text>
+                          <TouchableOpacity key={ci} style={[styles.monthCell, today && styles.monthCellToday, hol && !today && { backgroundColor: '#FFF1F2' }]} onPress={() => openAddEvent(undefined, ds)}>
+                            <Text style={[styles.monthCellDate, today && styles.monthCellDateToday, ci === 0 && !today && { color: '#EF4444' }, ci === 6 && !today && { color: '#3B82F6' }, hol && !today && { color: '#EF4444' }]}>{day}</Text>
+                            {hol && !today && <Text style={{ fontSize: 9, color: '#DC2626' }} numberOfLines={1}>{hol}</Text>}
                             {dayEvs.slice(0, 3).map(ev => {
                               const c = EVENT_TYPE_COLORS[ev.event_type];
+                              const done = !!ev.completed_at;
                               return (
-                                <TouchableOpacity key={ev.id} style={[styles.monthEventChip, { backgroundColor: c.bg }]} onPress={(e) => { (e as any).stopPropagation?.(); openEditEvent(ev); }}>
-                                  <Text style={[styles.monthEventChipText, { color: c.text }]} numberOfLines={1}>{ev.title}</Text>
+                                <TouchableOpacity key={ev.id} style={[styles.monthEventChip, { backgroundColor: c.bg }, done && { opacity: 0.5 }]} onPress={(e) => { (e as any).stopPropagation?.(); openEditEvent(ev); }}>
+                                  <Text style={[styles.monthEventChipText, { color: c.text, textDecorationLine: done ? 'line-through' : 'none' }]} numberOfLines={1}>{done ? '✅ ' : ''}{ev.title}</Text>
                                 </TouchableOpacity>
                               );
                             })}
@@ -2152,13 +3085,13 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                               const c = EVENT_TYPE_COLORS[ev.event_type];
                               const d = new Date(ev.event_date + 'T00:00:00');
                               return (
-                                <TouchableOpacity key={ev.id} style={[styles.listBoxItem, { borderLeftColor: c.border }]} onPress={() => openEditEvent(ev)}>
+                                <TouchableOpacity key={ev.id} style={[styles.listBoxItem, { borderLeftColor: c.border }, ev.completed_at && { opacity: 0.5 }]} onPress={() => openEditEvent(ev)}>
                                   <View style={styles.listBoxDateCol}>
                                     <Text style={styles.listBoxDateNum}>{d.getDate()}</Text>
                                     <Text style={styles.listBoxDateDay}>{DAY_NAMES[d.getDay()]}</Text>
                                   </View>
                                   <View style={{ flex: 1 }}>
-                                    <Text style={styles.listBoxItemTitle} numberOfLines={1}>{ev.title}</Text>
+                                    <Text style={[styles.listBoxItemTitle, ev.completed_at && { textDecorationLine: 'line-through' }]} numberOfLines={1}>{ev.completed_at ? '✅ ' : ''}{ev.title}</Text>
                                     <Text style={styles.listBoxItemTime}>
                                       {ev.start_time ? `${ev.start_time.slice(0,5)}${ev.end_time ? ` 〜 ${ev.end_time.slice(0,5)}` : ''}` : '終日'}
                                     </Text>
@@ -2207,13 +3140,14 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                               {row.map((day, ci) => {
                                 if (!day) return <View key={ci} style={styles.yearDayCell} />;
                                 const ds = `${y}-${String(mi+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
-                                const evCount = filteredEvents.filter(e => e.event_date === ds).length;
+                                const evCount = filteredEvents.filter(e => evOnDate(e, ds)).length;
                                 const today = ds === dateStr(new Date());
-                                const firstEv = filteredEvents.find(e => e.event_date === ds);
+                                const yHol = isHoliday(new Date(ds + 'T00:00:00'));
+                                const firstEv = filteredEvents.find(e => evOnDate(e, ds));
                                 const dotColor = firstEv ? EVENT_TYPE_COLORS[firstEv.event_type].text : '#8B5CF6';
                                 return (
-                                  <TouchableOpacity key={ci} style={[styles.yearDayCell, today && styles.yearDayCellToday]} onPress={() => { setSchedNavDate(new Date(y, mi, day)); setSchedView('day'); }}>
-                                    <Text style={[styles.yearDayNum, today && styles.yearDayNumToday, ci === 0 && !today && { color: '#EF4444' }, ci === 6 && !today && { color: '#3B82F6' }]}>{day}</Text>
+                                  <TouchableOpacity key={ci} style={[styles.yearDayCell, today && styles.yearDayCellToday, yHol && !today && { backgroundColor: '#FFF1F2' }]} onPress={() => { setSchedNavDate(new Date(y, mi, day)); setSchedView('day'); }}>
+                                    <Text style={[styles.yearDayNum, today && styles.yearDayNumToday, ci === 0 && !today && { color: '#EF4444' }, ci === 6 && !today && { color: '#3B82F6' }, yHol && !today && { color: '#EF4444' }]}>{day}</Text>
                                     {evCount > 0 && <View style={[styles.yearEventDot, { backgroundColor: dotColor }]} />}
                                   </TouchableOpacity>
                                 );
@@ -2281,8 +3215,8 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                 <TouchableOpacity onPress={() => setEventModal(false)}><Text style={styles.modalClose}>✕</Text></TouchableOpacity>
               </View>
               <ScrollView showsVerticalScrollIndicator={false}>
-                <Text style={styles.fLabel}>タイトル *</Text>
-                <TextInput style={styles.fInput} value={evTitle} onChangeText={setEvTitle} placeholder="例: 営業会議" />
+                <Text style={styles.fLabel}>タイトル{evType === '休み' ? '' : ' *'}</Text>
+                <TextInput style={styles.fInput} value={evTitle} onChangeText={setEvTitle} placeholder={evType === '休み' ? '（任意・空欄なら「休み」）' : '例: 営業会議'} />
 
                 <Text style={styles.fLabel}>種別</Text>
                 <View style={styles.segRow}>
@@ -2299,19 +3233,43 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                   })}
                 </View>
 
-                <Text style={styles.fLabel}>日付 (YYYY-MM-DD)</Text>
-                <TextInput style={styles.fInput} value={evDate} onChangeText={setEvDate} placeholder="例: 2026-04-07" keyboardType="numbers-and-punctuation" />
+                <View style={{ flexDirection: 'row', gap: 12 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fLabel}>開始日</Text>
+                    <TextInput style={styles.fInput} value={evDate} onChangeText={(v) => { setEvDate(v); if (!evEndDate || evEndDate < v) setEvEndDate(v); }} placeholder="2026-04-07" keyboardType="numbers-and-punctuation" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fLabel}>終了日</Text>
+                    <TextInput style={styles.fInput} value={evEndDate} onChangeText={setEvEndDate} placeholder="2026-04-07" keyboardType="numbers-and-punctuation" />
+                  </View>
+                </View>
 
                 <View style={{ flexDirection: 'row', gap: 12 }}>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.fLabel}>開始時刻 (HH:MM)</Text>
-                    <TextInput style={styles.fInput} value={evStart} onChangeText={setEvStart} placeholder="09:00" keyboardType="numbers-and-punctuation" />
+                    <Text style={styles.fLabel}>開始時刻</Text>
+                    <input type="time" value={evStart} onChange={e => setEvStart(e.target.value)} style={{ padding: 10, fontSize: 15, borderRadius: 8, border: '1px solid #ddd', width: '100%', boxSizing: 'border-box' as any }} />
                   </View>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.fLabel}>終了時刻 (HH:MM)</Text>
-                    <TextInput style={styles.fInput} value={evEnd} onChangeText={setEvEnd} placeholder="10:00" keyboardType="numbers-and-punctuation" />
+                    <Text style={styles.fLabel}>終了時刻</Text>
+                    <input type="time" value={evEnd} onChange={e => setEvEnd(e.target.value)} style={{ padding: 10, fontSize: 15, borderRadius: 8, border: '1px solid #ddd', width: '100%', boxSizing: 'border-box' as any }} />
                   </View>
                 </View>
+
+                <Text style={styles.fLabel}>📍 場所</Text>
+                <TextInput style={styles.fInput} value={evLocation} onChangeText={setEvLocation} placeholder="例: 第1会議室、本社3F" />
+
+                {/* 編集時：ステータス表示（作成者のみ） */}
+                {editingEvent && editingEvent.assigned_by === currentUserId && editingEvent.user_id !== currentUserId && (
+                  <View style={{ backgroundColor: '#F8FAFC', borderRadius: 10, padding: 12, marginBottom: 16, borderWidth: 1, borderColor: '#E2E8F0' }}>
+                    <Text style={{ fontSize: 13, fontWeight: '600', color: '#334155', marginBottom: 4 }}>📋 承認状況</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <Text style={{ fontSize: 13, color: '#64748B' }}>ステータス:</Text>
+                      <Text style={{ fontSize: 14, fontWeight: 'bold', color: editingEvent.status === 'accepted' ? '#22C55E' : editingEvent.status === 'declined' ? '#EF4444' : '#F59E0B' }}>
+                        {editingEvent.status === 'accepted' ? '✓ 承認済み' : editingEvent.status === 'declined' ? '✕ 拒否' : '⏳ 未回答'}
+                      </Text>
+                    </View>
+                  </View>
+                )}
 
                 {isAdmin ? (
                   <>
@@ -2339,6 +3297,19 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
 
                 <Text style={styles.fLabel}>メモ</Text>
                 <TextInput style={[styles.fInput, styles.fTextArea]} value={evMemo} onChangeText={setEvMemo} placeholder="備考・詳細など" multiline />
+
+                {/* 完了ボタン（編集時のみ） */}
+                {editingEvent && (
+                  <TouchableOpacity
+                    onPress={() => toggleCompleteEvent(editingEvent)}
+                    style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 14, borderRadius: 10, marginBottom: 12, backgroundColor: editingEvent.completed_at ? '#DCFCE7' : '#F1F5F9', borderWidth: 1, borderColor: editingEvent.completed_at ? '#22C55E' : '#CBD5E1' }}
+                  >
+                    <Text style={{ fontSize: 18 }}>{editingEvent.completed_at ? '✅' : '⬜'}</Text>
+                    <Text style={{ fontSize: 15, fontWeight: '700', color: editingEvent.completed_at ? '#166534' : '#475569' }}>
+                      {editingEvent.completed_at ? `完了済み（${new Date(editingEvent.completed_at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}）— タップで解除` : '完了にする'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
 
                 <View style={styles.modalBtns}>
                   {editingEvent && (
@@ -2453,7 +3424,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                         <Text style={styles.submitBtnText}>↩ 返信</Text>
                       </TouchableOpacity>
                     )}
-                    <TouchableOpacity style={[styles.cancelBtn, { flex: 1, backgroundColor: '#FEF2F2', borderColor: '#FECACA' }]} onPress={() => { if (window.confirm('このメールを削除しますか？')) deleteMail(viewMail); }}>
+                    <TouchableOpacity style={[styles.cancelBtn, { flex: 1, backgroundColor: '#FEF2F2', borderColor: '#FECACA' }]} onPress={async () => { if (await confirmDialog('このメールを削除しますか？')) deleteMail(viewMail); }}>
                       <Text style={[styles.cancelBtnText, { color: '#DC2626' }]}>🗑 削除</Text>
                     </TouchableOpacity>
                   </View>
@@ -2721,6 +3692,414 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   // ═══════════════════════════════════════════════════════════
   // BUSINESS CARDS
   // ═══════════════════════════════════════════════════════════
+  if (screen === 'interviews') {
+    const getResultColor = (result: string) => {
+      if (result === '採用') return '#22C55E';
+      if (result === '不採用') return '#EF4444';
+      if (result === '選考') return '#F59E0B';
+      return '#94A3B8';
+    };
+    const getStatusColor = (status: string) => {
+      if (status?.includes('契約済み')) return '#22C55E';
+      if (status?.includes('契約更新')) return '#3B82F6';
+      return '#94A3B8';
+    };
+
+    return (
+      <View style={styles.container}>
+        {renderHeader('👔 面談シート', null)}
+
+        {/* フィルタータブ（契約書進捗ベース） */}
+        <View style={{ flexDirection: 'row', paddingHorizontal: 12, paddingTop: 10, paddingBottom: 6, gap: 6, flexWrap: 'wrap' }}>
+          {([['all', '全て'], ['none', '未着手'], ['契約済', '契約済'], ['契約更新', '契約更新'], ['送付', '書類送付'], ['依頼', '依頼(社内)'], ['更新（社内', '更新(社内)'], ['master_done', 'マスタ済'], ['master_none', 'マスタ未']] as [string, string][]).map(([key, label], i) => (
+            <TouchableOpacity key={key + i} onPress={() => setInterviewFilter(key)}
+              style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20, backgroundColor: interviewFilter === key ? '#7C3AED' : '#F1F5F9' }}>
+              <Text style={{ fontSize: 12, fontWeight: '600', color: interviewFilter === key ? '#fff' : '#64748B' }}>{label}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        <View style={styles.bcSearchBar}>
+          <Text style={styles.bcSearchIcon}>🔍</Text>
+          <TextInput style={styles.bcSearchInput} value={interviewSearch} onChangeText={setInterviewSearch}
+            placeholder="氏名・配属先・結果で検索" placeholderTextColor="#94A3B8" />
+          {interviewSearch ? <TouchableOpacity onPress={() => setInterviewSearch('')}><Text style={{ color: '#94A3B8', fontSize: 16 }}>✕</Text></TouchableOpacity> : null}
+        </View>
+
+        <Text style={styles.bcCount}>{filteredInterviews.length}件</Text>
+
+        {interviewsLoading ? <ActivityIndicator style={{ marginTop: 40 }} color="#7C3AED" /> : (
+          <FlatList
+            data={filteredInterviews}
+            keyExtractor={(_, i) => String(i)}
+            contentContainerStyle={{ padding: 12, paddingBottom: 40 }}
+            ListEmptyComponent={<Text style={[styles.emptyText, { marginTop: 40 }]}>データがありません</Text>}
+            renderItem={({ item: r }) => (
+              <TouchableOpacity
+                style={{ backgroundColor: '#fff', borderRadius: 12, padding: 14, marginBottom: 8, borderLeftWidth: 4, borderLeftColor: getResultColor(r.interview_result), shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 4, elevation: 2 }}
+                onPress={() => setInterviewDetail(r)}
+              >
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#1E293B' }}>{r.name}</Text>
+                    <Text style={{ fontSize: 12, color: '#94A3B8', marginTop: 2 }}>{r.timestamp}</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', gap: 4 }}>
+                    {r.interview_result ? (
+                      <View style={{ backgroundColor: getResultColor(r.interview_result) + '20', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 2 }}>
+                        <Text style={{ fontSize: 11, fontWeight: 'bold', color: getResultColor(r.interview_result) }}>{r.interview_result}</Text>
+                      </View>
+                    ) : null}
+                    {r.contract_status ? (
+                      <View style={{ backgroundColor: getStatusColor(r.contract_status) + '20', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 2 }}>
+                        <Text style={{ fontSize: 11, fontWeight: '600', color: getStatusColor(r.contract_status) }}>{r.contract_status}</Text>
+                      </View>
+                    ) : null}
+                  </View>
+                </View>
+                <View style={{ flexDirection: 'row', gap: 10, marginTop: 6, flexWrap: 'wrap' }}>
+                  {r.preferred_site ? <Text style={{ fontSize: 12, color: '#64748B' }}>📍 {r.preferred_site}</Text> : null}
+                  {r.result_site ? <Text style={{ fontSize: 12, color: '#64748B' }}>🏢 {r.result_site}</Text> : null}
+                  {r.master_update ? <Text style={{ fontSize: 11, color: '#22C55E' }}>✅ マスタ済</Text> : <Text style={{ fontSize: 11, color: '#CBD5E1' }}>⬜ マスタ未</Text>}
+                </View>
+              </TouchableOpacity>
+            )}
+          />
+        )}
+
+        {/* 詳細モーダル */}
+        <Modal visible={!!interviewDetail} transparent animationType="slide" onRequestClose={() => setInterviewDetail(null)}>
+          <View style={{ flex: 1, backgroundColor: 'rgba(15,23,42,0.7)', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+            <View style={{ backgroundColor: '#fff', borderRadius: 16, padding: 20, width: '100%', maxWidth: 480, maxHeight: '85%' }}>
+              <TouchableOpacity style={{ position: 'absolute', top: 12, right: 12, zIndex: 10 }} onPress={() => setInterviewDetail(null)}>
+                <Text style={{ fontSize: 20, color: '#94A3B8' }}>✕</Text>
+              </TouchableOpacity>
+              {interviewDetail && (
+                <ScrollView>
+                  <View style={{ backgroundColor: '#7C3AED', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+                    <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#fff' }}>{interviewDetail.name}</Text>
+                    <Text style={{ fontSize: 13, color: '#DDD6FE', marginTop: 4 }}>{interviewDetail.timestamp}</Text>
+                  </View>
+
+                  {[
+                    ['希望配属先', interviewDetail.preferred_site],
+                    ['退職理由', interviewDetail.quit_reason],
+                    ['振込先口座', interviewDetail.deposit_account],
+                    ['契約書進捗', interviewDetail.contract_status],
+                    ['面談日・コメント', interviewDetail.interview_date_comment],
+                    ['採否結果', interviewDetail.interview_result],
+                    ['配属先（結果）', interviewDetail.result_site],
+                    ['不採用理由', interviewDetail.non_hire_reason],
+                    ['マスタ更新', interviewDetail.master_update],
+                  ].filter(([, val]) => val).map(([label, val]) => (
+                    <View key={label as string} style={{ flexDirection: 'row', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#F1F5F9' }}>
+                      <Text style={{ width: 120, fontSize: 13, color: '#94A3B8' }}>{label}</Text>
+                      <Text style={{ flex: 1, fontSize: 13, color: '#1E293B', fontWeight: '500' }}>{val}</Text>
+                    </View>
+                  ))}
+
+                  <TouchableOpacity style={{ backgroundColor: '#7C3AED', borderRadius: 10, padding: 12, alignItems: 'center', marginTop: 16 }}
+                    onPress={() => { setInterviewDetail(null); openEditInterview(interviewDetail); }}>
+                    <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 14 }}>✏️ 編集</Text>
+                  </TouchableOpacity>
+                </ScrollView>
+              )}
+            </View>
+          </View>
+        </Modal>
+
+        {/* 編集モーダル */}
+        <Modal visible={interviewEditModal} transparent animationType="slide" onRequestClose={() => setInterviewEditModal(false)}>
+          <View style={{ flex: 1, backgroundColor: 'rgba(15,23,42,0.7)', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+            <View style={{ backgroundColor: '#fff', borderRadius: 16, padding: 20, width: '100%', maxWidth: 480, maxHeight: '90%' }}>
+              <TouchableOpacity style={{ position: 'absolute', top: 12, right: 12, zIndex: 10 }} onPress={() => setInterviewEditModal(false)}>
+                <Text style={{ fontSize: 20, color: '#94A3B8' }}>✕</Text>
+              </TouchableOpacity>
+              <ScrollView>
+                <Text style={{ fontSize: 18, fontWeight: 'bold', color: '#7C3AED', marginBottom: 4 }}>✏️ 面談結果を編集</Text>
+                <Text style={{ fontSize: 14, color: '#64748B', marginBottom: 16 }}>{editInterview?.name}</Text>
+
+                <Text style={styles.fLabel}>契約書進捗</Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+                  {['', '契約済み', '契約更新済み'].map(s => (
+                    <TouchableOpacity key={s} onPress={() => setIvContractStatus(s)}
+                      style={{ paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, backgroundColor: ivContractStatus === s ? '#7C3AED' : '#F1F5F9' }}>
+                      <Text style={{ fontSize: 13, color: ivContractStatus === s ? '#fff' : '#475569' }}>{s || '未設定'}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                <Text style={styles.fLabel}>面談日・予定日及びコメント</Text>
+                <TextInput style={styles.fInput} value={ivDateComment} onChangeText={setIvDateComment} placeholder="2024/05/24" />
+
+                <Text style={styles.fLabel}>採否結果</Text>
+                <View style={{ flexDirection: 'row', gap: 6, marginBottom: 12 }}>
+                  {['選考', '採用', '不採用'].map(s => (
+                    <TouchableOpacity key={s} onPress={() => setIvResult(s)}
+                      style={{ flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: 'center', backgroundColor: ivResult === s ? getResultColor(s) : '#F1F5F9' }}>
+                      <Text style={{ fontSize: 13, fontWeight: 'bold', color: ivResult === s ? '#fff' : '#475569' }}>{s}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                <Text style={styles.fLabel}>配属先（結果）</Text>
+                <TextInput style={styles.fInput} value={ivResultSite} onChangeText={setIvResultSite} placeholder="東京都売（城北）" />
+
+                <Text style={styles.fLabel}>不採用理由</Text>
+                <TextInput style={styles.fInput} value={ivNonHireReason} onChangeText={setIvNonHireReason} placeholder="" />
+
+                <Text style={styles.fLabel}>マスタ更新</Text>
+                <TouchableOpacity
+                  onPress={() => setIvMasterUpdate(ivMasterUpdate ? '' : 'TRUE')}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    paddingVertical: 10,
+                    paddingHorizontal: 12,
+                    borderRadius: 8,
+                    backgroundColor: '#F8FAFC',
+                    borderWidth: 1,
+                    borderColor: '#E2E8F0',
+                    marginBottom: 12,
+                  }}
+                >
+                  <View
+                    style={{
+                      width: 22,
+                      height: 22,
+                      borderRadius: 4,
+                      borderWidth: 2,
+                      borderColor: ivMasterUpdate ? '#22C55E' : '#94A3B8',
+                      backgroundColor: ivMasterUpdate ? '#22C55E' : '#fff',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      marginRight: 10,
+                    }}
+                  >
+                    {ivMasterUpdate ? <Text style={{ color: '#fff', fontSize: 14, fontWeight: 'bold' }}>✓</Text> : null}
+                  </View>
+                  <Text style={{ fontSize: 14, color: '#1E293B' }}>
+                    {ivMasterUpdate ? 'マスタ更新済み' : 'マスタ未更新'}
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity style={{ backgroundColor: '#7C3AED', borderRadius: 10, padding: 14, alignItems: 'center', marginTop: 16 }}
+                  onPress={saveInterview} disabled={savingInterview}>
+                  <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 15 }}>{savingInterview ? '保存中...' : '更新する'}</Text>
+                </TouchableOpacity>
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
+      </View>
+    );
+  }
+
+  if (screen === 'vehicles') {
+    // 車検期限チェック
+    const today = new Date();
+    const getExpStatus = (dateStr: string) => {
+      if (!dateStr) return 'unknown';
+      const d = new Date(dateStr);
+      const diff = (d.getTime() - today.getTime()) / (1000 * 60 * 60 * 24);
+      if (diff < 0) return 'expired';
+      if (diff < 30) return 'soon';
+      return 'ok';
+    };
+
+    return (
+      <View style={styles.container}>
+        {renderHeader('🚗 車両管理',
+          <TouchableOpacity style={[styles.headerAddBtn, { backgroundColor: '#EF4444' }]} onPress={openAddVehicle}>
+            <Text style={styles.headerAddBtnText}>＋ 登録</Text>
+          </TouchableOpacity>
+        )}
+
+        <View style={styles.bcSearchBar}>
+          <Text style={styles.bcSearchIcon}>🔍</Text>
+          <TextInput style={styles.bcSearchInput} value={vehicleSearch} onChangeText={setVehicleSearch}
+            placeholder="氏名・メーカー・ナンバーで検索" placeholderTextColor="#94A3B8" />
+          {vehicleSearch ? <TouchableOpacity onPress={() => setVehicleSearch('')}><Text style={{ color: '#94A3B8', fontSize: 16 }}>✕</Text></TouchableOpacity> : null}
+        </View>
+
+        <Text style={styles.bcCount}>{filteredVehicles.length}台の車両</Text>
+
+        {vehiclesLoading ? <ActivityIndicator style={{ marginTop: 40 }} color="#EF4444" /> : (
+          <FlatList
+            data={filteredVehicles}
+            keyExtractor={(_, i) => String(i)}
+            contentContainerStyle={{ padding: 12, paddingBottom: 40 }}
+            ListEmptyComponent={<Text style={[styles.emptyText, { marginTop: 40 }]}>車両データがありません</Text>}
+            renderItem={({ item: v }) => {
+              const expStatus = getExpStatus(v.inspection_expiry);
+              const displayName = [v.car_name, v.maker].filter(Boolean).join(' / ') || '車名未登録';
+              return (
+                <TouchableOpacity
+                  style={{ backgroundColor: '#fff', borderRadius: 12, padding: 14, marginBottom: 10, borderLeftWidth: 4, borderLeftColor: expStatus === 'expired' ? '#EF4444' : expStatus === 'soon' ? '#F59E0B' : '#22C55E', shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 4, elevation: 2 }}
+                  onPress={() => setVehicleDetail(v)}
+                >
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 15, fontWeight: 'bold', color: '#1E293B', marginBottom: 2 }}>{displayName}</Text>
+                      <Text style={{ fontSize: 14, color: '#475569', marginBottom: 6 }}>{v.number || 'ナンバー未登録'}</Text>
+                    </View>
+                    {v.category ? <View style={{ backgroundColor: '#E0E7FF', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 2 }}><Text style={{ fontSize: 11, color: '#4338CA', fontWeight: '600' }}>{v.category}</Text></View> : null}
+                  </View>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Text style={{ fontSize: 12, color: '#94A3B8' }}>👤 {v.name || v.owner || '-'}</Text>
+                    {v.inspection_expiry ? (
+                      <Text style={{ fontSize: 12, fontWeight: '600', color: expStatus === 'expired' ? '#EF4444' : expStatus === 'soon' ? '#F59E0B' : '#64748B' }}>
+                        車検 {v.inspection_expiry}{expStatus === 'expired' ? ' ⚠️切れ' : expStatus === 'soon' ? ' ⚠️' : ''}
+                      </Text>
+                    ) : <Text style={{ fontSize: 12, color: '#CBD5E1' }}>車検未登録</Text>}
+                  </View>
+                </TouchableOpacity>
+              );
+            }}
+          />
+        )}
+
+        {/* 車両詳細モーダル */}
+        <Modal visible={!!vehicleDetail} transparent animationType="slide" onRequestClose={() => setVehicleDetail(null)}>
+          <View style={{ flex: 1, backgroundColor: 'rgba(15,23,42,0.7)', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+            <View style={{ backgroundColor: '#fff', borderRadius: 16, padding: 20, width: '100%', maxWidth: 480, maxHeight: '85%' }}>
+              <TouchableOpacity style={styles.modalClose} onPress={() => setVehicleDetail(null)}>
+                <Text style={styles.modalCloseText}>✕</Text>
+              </TouchableOpacity>
+              {vehicleDetail && (
+                <ScrollView style={{ maxHeight: 520 }}>
+                  {/* ヘッダーカード */}
+                  <View style={{ backgroundColor: '#1E293B', borderRadius: 12, padding: 16, marginBottom: 16 }}>
+                    <Text style={{ fontSize: 18, fontWeight: 'bold', color: '#fff', marginBottom: 2 }}>{vehicleDetail.car_name || '車名未登録'}</Text>
+                    <Text style={{ fontSize: 14, color: '#94A3B8', marginBottom: 8 }}>{vehicleDetail.maker}</Text>
+                    <View style={{ backgroundColor: '#334155', borderRadius: 8, padding: 10, alignItems: 'center' }}>
+                      <Text style={{ fontSize: 16, fontWeight: 'bold', color: '#F8FAFC', letterSpacing: 2 }}>{vehicleDetail.number || '-'}</Text>
+                    </View>
+                  </View>
+
+                  {/* 基本情報 */}
+                  <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#64748B', marginBottom: 8 }}>基本情報</Text>
+                  {[
+                    ['登録者', vehicleDetail.name],
+                    ['車台番号', vehicleDetail.chassis],
+                    ['所有者', vehicleDetail.owner],
+                    ['区分', vehicleDetail.category],
+                  ].filter(([, val]) => val).map(([label, val]) => (
+                    <View key={label as string} style={{ flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: '#F1F5F9' }}>
+                      <Text style={{ width: 90, fontSize: 13, color: '#94A3B8' }}>{label}</Text>
+                      <Text style={{ flex: 1, fontSize: 13, color: '#1E293B', fontWeight: '500' }}>{val}</Text>
+                    </View>
+                  ))}
+
+                  {/* 車検・保険 */}
+                  <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#64748B', marginTop: 16, marginBottom: 8 }}>車検・保険</Text>
+                  {[
+                    ['車検満了日', vehicleDetail.inspection_expiry],
+                    ['任意保険', vehicleDetail.insurance],
+                    ['納税', vehicleDetail.tax],
+                  ].filter(([, val]) => val).map(([label, val]) => (
+                    <View key={label as string} style={{ flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: '#F1F5F9' }}>
+                      <Text style={{ width: 90, fontSize: 13, color: '#94A3B8' }}>{label}</Text>
+                      <Text style={{ flex: 1, fontSize: 13, color: label === '車検満了日' && getExpStatus(val as string) !== 'ok' ? '#EF4444' : '#1E293B', fontWeight: '500' }}>{val}</Text>
+                    </View>
+                  ))}
+
+                  {/* 費用 */}
+                  {(vehicleDetail.amount || vehicleDetail.payment_date) && (
+                    <>
+                      <Text style={{ fontSize: 13, fontWeight: 'bold', color: '#64748B', marginTop: 16, marginBottom: 8 }}>費用</Text>
+                      {[
+                        ['支払日', vehicleDetail.payment_date],
+                        ['金額', vehicleDetail.amount ? `¥${Number(vehicleDetail.amount).toLocaleString()}` : ''],
+                      ].filter(([, val]) => val).map(([label, val]) => (
+                        <View key={label as string} style={{ flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: '#F1F5F9' }}>
+                          <Text style={{ width: 90, fontSize: 13, color: '#94A3B8' }}>{label}</Text>
+                          <Text style={{ flex: 1, fontSize: 13, color: '#1E293B', fontWeight: '500' }}>{val}</Text>
+                        </View>
+                      ))}
+                    </>
+                  )}
+
+                  <View style={{ flexDirection: 'row', gap: 10, marginTop: 20 }}>
+                    <TouchableOpacity style={{ flex: 1, backgroundColor: '#3B82F6', borderRadius: 10, padding: 12, alignItems: 'center' }} onPress={() => { setVehicleDetail(null); openEditVehicle(vehicleDetail); }}>
+                      <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 14 }}>✏️ 編集</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={{ flex: 1, backgroundColor: '#FEE2E2', borderRadius: 10, padding: 12, alignItems: 'center' }} onPress={() => deleteVehicle(vehicleDetail)}>
+                      <Text style={{ color: '#EF4444', fontWeight: 'bold', fontSize: 14 }}>🗑 削除</Text>
+                    </TouchableOpacity>
+                  </View>
+                </ScrollView>
+              )}
+            </View>
+          </View>
+        </Modal>
+
+        {/* 車両登録/編集モーダル */}
+        <Modal visible={vehicleModal} transparent animationType="slide" onRequestClose={() => setVehicleModal(false)}>
+          <View style={{ flex: 1, backgroundColor: 'rgba(15,23,42,0.7)', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+            <View style={{ backgroundColor: '#fff', borderRadius: 16, padding: 20, width: '100%', maxWidth: 500, maxHeight: '90%' }}>
+              <TouchableOpacity style={{ position: 'absolute', top: 12, right: 12, zIndex: 10 }} onPress={() => setVehicleModal(false)}>
+                <Text style={{ fontSize: 20, color: '#94A3B8' }}>✕</Text>
+              </TouchableOpacity>
+              <ScrollView style={{ maxHeight: 550 }}>
+                <Text style={[styles.modalTitle, { marginBottom: 12 }]}>{editVehicle ? '🚗 車両を編集' : '🚗 車両を登録'}</Text>
+
+                <Text style={styles.fLabel}>登録者名</Text>
+                <TextInput style={styles.fInput} value={vName} onChangeText={setVName} placeholder="山田太郎" />
+
+                <Text style={styles.fLabel}>メーカー *</Text>
+                <TextInput style={styles.fInput} value={vMaker} onChangeText={setVMaker} placeholder="トヨタ" />
+
+                <Text style={styles.fLabel}>車名</Text>
+                <TextInput style={styles.fInput} value={vCarName} onChangeText={setVCarName} placeholder="プリウス" />
+
+                <Text style={styles.fLabel}>車台番号</Text>
+                <TextInput style={styles.fInput} value={vChassis} onChangeText={setVChassis} placeholder="DG17V-104309" />
+
+                <Text style={styles.fLabel}>ナンバー *</Text>
+                <TextInput style={styles.fInput} value={vNumber} onChangeText={setVNumber} placeholder="練馬 481り 2947" />
+
+                <Text style={styles.fLabel}>ナンバー色</Text>
+                <TextInput style={styles.fInput} value={vNumberColor} onChangeText={setVNumberColor} placeholder="白" />
+
+                <Text style={styles.fLabel}>納税状況</Text>
+                <TextInput style={styles.fInput} value={vTax} onChangeText={setVTax} placeholder="納税証明あり" />
+
+                <Text style={styles.fLabel}>任意保険</Text>
+                <TextInput style={styles.fInput} value={vInsurance} onChangeText={setVInsurance} placeholder="2024" />
+
+                <Text style={styles.fLabel}>区分</Text>
+                <TextInput style={styles.fInput} value={vCategory} onChangeText={setVCategory} placeholder="営業 / 役員 / 社員" />
+
+                <Text style={styles.fLabel}>所有者(名前)</Text>
+                <TextInput style={styles.fInput} value={vOwner} onChangeText={setVOwner} placeholder="NELTEC" />
+
+                <Text style={styles.fLabel}>車検満了日</Text>
+                <TextInput style={styles.fInput} value={vInspExpiry} onChangeText={setVInspExpiry} placeholder="2026/02/28" />
+
+                <Text style={styles.fLabel}>車検お知らせ</Text>
+                <TextInput style={styles.fInput} value={vInspNotify} onChangeText={setVInspNotify} placeholder="車検" />
+
+                <Text style={styles.fLabel}>支払い最終日</Text>
+                <TextInput style={styles.fInput} value={vPayDate} onChangeText={setVPayDate} placeholder="2023/11/27" />
+
+                <Text style={styles.fLabel}>金額</Text>
+                <TextInput style={styles.fInput} value={vAmount} onChangeText={setVAmount} placeholder="22660" keyboardType="numeric" />
+
+                <Text style={styles.fLabel}>廃車</Text>
+                <TextInput style={styles.fInput} value={vScrapped} onChangeText={setVScrapped} placeholder="" />
+
+                <TouchableOpacity style={[styles.dmButton, { marginTop: 16, backgroundColor: '#EF4444' }]} onPress={saveVehicle} disabled={savingVehicle}>
+                  <Text style={styles.dmButtonText}>{savingVehicle ? '保存中...' : (editVehicle ? '更新する' : '登録する')}</Text>
+                </TouchableOpacity>
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
+      </View>
+    );
+  }
+
   if (screen === 'cards') {
     // 会社ごとにグループ化
     const grouped: Record<string, BusinessCard[]> = {};
@@ -3164,9 +4543,23 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
           </TouchableOpacity>
         )}
 
+        {/* 新着報告書のお知らせバナー */}
+        {reportNotifs.length > 0 && (
+          <View style={{ paddingHorizontal: 12, paddingTop: 8 }}>
+            {reportNotifs.map(n => (
+              <View key={n.id} style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEF3C7', borderColor: '#F59E0B', borderWidth: 1, borderRadius: 8, padding: 10, marginBottom: 6 }}>
+                <Text style={{ flex: 1, fontSize: 13, color: '#92400E' }}>📝 新しい報告書: <Text style={{ fontWeight: 'bold' }}>{n.report_title}</Text>{n.author_name ? `（${n.author_name}）` : ''} {n.report_date}</Text>
+                <TouchableOpacity onPress={() => dismissReportNotif(n.id)} style={{ paddingHorizontal: 12, paddingVertical: 6, backgroundColor: '#F59E0B', borderRadius: 6, marginLeft: 8 }}>
+                  <Text style={{ color: '#fff', fontSize: 12, fontWeight: 'bold' }}>確認</Text>
+                </TouchableOpacity>
+              </View>
+            ))}
+          </View>
+        )}
+
         {/* フィルタ */}
         <View style={styles.rpFilterRow}>
-          {([['mine', '自分の報告書'], ['draft', '下書き'], ...(isAdmin ? [['all', '全報告書']] : [])] as [string, string][]).map(([k, l]) => (
+          {([['mine', '自分の報告書'], ['draft', '下書き'], ['all', '全報告書']] as [string, string][]).map(([k, l]) => (
             <TouchableOpacity key={k} style={[styles.rpFilterChip, reportFilter === k && styles.rpFilterChipActive]} onPress={() => setReportFilter(k as any)}>
               <Text style={[styles.rpFilterChipText, reportFilter === k && styles.rpFilterChipTextActive]}>{l}</Text>
             </TouchableOpacity>
@@ -3182,7 +4575,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
             renderItem={({ item: r }) => {
               const sc = REPORT_STATUS_COLOR[r.status];
               return (
-                <TouchableOpacity style={styles.rpCard} onPress={() => setViewReport(r)}>
+                <TouchableOpacity style={styles.rpCard} onPress={() => { setViewReport(r); setRpComment(''); setReportComments([]); fetchReportComments(r.id); }}>
                   <View style={styles.rpCardTop}>
                     <View style={[styles.rpStatusBadge, { backgroundColor: sc.bg }]}>
                       <Text style={[styles.rpStatusBadgeText, { color: sc.text }]}>{r.status}</Text>
@@ -3249,11 +4642,19 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                     <Text style={styles.rpViewBodyText}>{viewReport.content || '（本文なし）'}</Text>
                   </View>
 
-                  {/* コメント */}
-                  {viewReport.comment && (
-                    <View style={styles.rpViewComment}>
-                      <Text style={styles.rpViewCommentLabel}>コメント（{viewReport.approver?.display_name ?? '管理者'}）</Text>
-                      <Text style={styles.rpViewCommentText}>{viewReport.comment}</Text>
+                  {/* コメント履歴 */}
+                  {reportComments.length > 0 && (
+                    <View style={{ marginTop: 12, gap: 8 }}>
+                      <Text style={styles.rpViewCommentLabel}>コメント履歴 ({reportComments.length}件)</Text>
+                      {reportComments.map((c) => (
+                        <View key={c.id} style={styles.rpViewComment}>
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                            <Text style={{ fontSize: 12, fontWeight: '700', color: '#0C4A6E' }}>{c.profiles?.display_name ?? '管理者'}</Text>
+                            <Text style={{ fontSize: 11, color: '#64748B' }}>{c.created_at.replace('T', ' ').slice(0, 16)}</Text>
+                          </View>
+                          <Text style={styles.rpViewCommentText}>{c.content}</Text>
+                        </View>
+                      ))}
                     </View>
                   )}
 
@@ -3306,6 +4707,17 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                         </View>
                       </View>
                     )}
+
+                    {/* 管理者: 承認済み後もコメント追加可能 */}
+                    {isAdmin && viewReport.status === '承認済' && (
+                      <View style={{ gap: 8, marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#E2E8F0' }}>
+                        <Text style={styles.fLabel}>コメントを追加</Text>
+                        <TextInput style={[styles.fInput, styles.fTextArea]} value={rpComment} onChangeText={setRpComment} multiline placeholder="追加コメント・フィードバックなど" />
+                        <TouchableOpacity style={[styles.submitBtn, { backgroundColor: '#059669' }]} onPress={() => addReportComment(viewReport, rpComment)}>
+                          <Text style={styles.submitBtnText}>💬 コメントを保存</Text>
+                        </TouchableOpacity>
+                      </View>
+                    )}
                   </View>
                 </ScrollView>
               )}
@@ -3337,8 +4749,25 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                 <Text style={styles.fLabel}>日付 (YYYY-MM-DD)</Text>
                 <TextInput style={styles.fInput} value={rpDate} onChangeText={setRpDate} placeholder="2026-04-07" keyboardType="numbers-and-punctuation" />
 
-                <Text style={styles.fLabel}>参加者・社内（任意）</Text>
-                <TextInput style={styles.fInput} value={rpParticipants} onChangeText={setRpParticipants} placeholder="例: 小林, 佐藤, 田中" />
+                <Text style={styles.fLabel}>参加者・社内（任意） — チェックしたメンバーに保存時メール送付</Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 14, padding: 8, borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 8, backgroundColor: '#F8FAFC' }}>
+                  {members.length === 0 ? (
+                    <Text style={{ fontSize: 12, color: '#94A3B8', padding: 8 }}>メンバー読込中...</Text>
+                  ) : members.map(m => {
+                    const selected = rpParticipantIds.includes(m.id);
+                    return (
+                      <TouchableOpacity
+                        key={m.id}
+                        style={[styles.assignChip, selected && styles.assignChipActive]}
+                        onPress={() => setRpParticipantIds(prev => prev.includes(m.id) ? prev.filter(id => id !== m.id) : [...prev, m.id])}
+                      >
+                        <Text style={[styles.assignChipText, selected && styles.assignChipTextActive]}>
+                          {selected ? '✓ ' : ''}{m.display_name}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
 
                 <Text style={styles.fLabel}>打ち合わせ相手・社外（任意）</Text>
                 <TextInput style={styles.fInput} value={rpExtParticipants} onChangeText={setRpExtParticipants} placeholder="例: 株式会社〇〇 山田様, △△商事 鈴木様" />
@@ -3406,12 +4835,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
       });
       const csv = BOM + header + rows;
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `勤怠データ_${adminAttendMonth}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(blob, `勤怠データ_${adminAttendMonth}.csv`);
     };
 
     return (
@@ -3450,7 +4874,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
               onPress={async () => {
                 const { data: { session } } = await supabase.auth.getSession();
                 if (!session) return;
-                if (!window.confirm('スプレッドシートのデータでDBを更新しますか？')) return;
+                if (!await confirmDialog('スプレッドシートのデータでDBを更新しますか？')) return;
                 alert('スプレッドシートから読み込み中...');
                 const resp = await fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/sync-attendance-sheets', {
                   method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}` },
@@ -4043,11 +5467,12 @@ const styles = StyleSheet.create({
   headerAddBtnText: { color: '#fff', fontSize: 13, fontWeight: 'bold' },
 
   // Nav grid
-  navGrid: { flexDirection: 'row', backgroundColor: '#fff', paddingVertical: 14, paddingHorizontal: 8, borderBottomWidth: 1, borderBottomColor: '#E2E8F0', justifyContent: 'space-around' },
-  navItem: { alignItems: 'center', flex: 1 },
-  navIconBox: { width: 52, height: 52, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginBottom: 5 },
-  navIcon: { fontSize: 26 },
-  navLabel: { fontSize: 11, color: '#374151', fontWeight: '500' },
+  navGridScroll: { backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#E2E8F0', maxHeight: 90 },
+  navGrid: { flexDirection: 'row', paddingVertical: 10, paddingHorizontal: 8 },
+  navItem: { alignItems: 'center', width: 76, marginHorizontal: 2 },
+  navIconBox: { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginBottom: 4 },
+  navIcon: { fontSize: 22 },
+  navLabel: { fontSize: 10, color: '#374151', fontWeight: '500', textAlign: 'center' },
 
   portalScroll: { padding: 12, gap: 12, paddingBottom: 40 },
 
@@ -4397,7 +5822,7 @@ const styles = StyleSheet.create({
 
   // Modal
   modalOverlay: { flex: 1, backgroundColor: 'rgba(15,23,42,0.55)', justifyContent: 'flex-end' },
-  modalSheet: { backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 48 },
+  modalSheet: { backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 48, maxHeight: '90%' },
   modalTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 },
   modalTitle: { fontSize: 17, fontWeight: 'bold', color: '#0F172A' },
   modalClose: { fontSize: 18, color: '#94A3B8' },
@@ -4424,8 +5849,8 @@ const styles = StyleSheet.create({
   weekNavBtn: { paddingHorizontal: 10, paddingVertical: 6, backgroundColor: '#EDE9FE', borderRadius: 8 },
   weekNavBtnText: { fontSize: 12, color: '#7C3AED', fontWeight: '600' },
   weekLabel: { fontSize: 12, color: '#475569', fontWeight: '600', textAlign: 'center', flex: 1, marginHorizontal: 8 },
-  schedHeaderRow: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#E2E8F0', backgroundColor: '#F8FAFC' },
-  schedMemberCell: { width: 90, padding: 8, justifyContent: 'center', borderRightWidth: 1, borderRightColor: '#E2E8F0' },
+  schedHeaderRow: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#E2E8F0', backgroundColor: '#F8FAFC', position: 'sticky' as any, top: 0, zIndex: 10 },
+  schedMemberCell: { width: 90, padding: 8, justifyContent: 'center', borderRightWidth: 1, borderRightColor: '#E2E8F0', position: 'sticky' as any, left: 0, zIndex: 3, backgroundColor: '#fff' },
   schedMemberHeader: { fontSize: 11, fontWeight: '700', color: '#94A3B8' },
   schedDayHeader: { width: 130, padding: 8, alignItems: 'center', borderRightWidth: 1, borderRightColor: '#E2E8F0' },
   schedDayHeaderToday: { backgroundColor: '#8B5CF6' },
@@ -4435,8 +5860,8 @@ const styles = StyleSheet.create({
   schedMemberName: { fontSize: 12, fontWeight: '600', color: '#334155', lineHeight: 16 },
   schedDayCell: { width: 130, minHeight: 80, padding: 4, borderRightWidth: 1, borderRightColor: '#E2E8F0', gap: 2 },
   schedDayCellToday: { backgroundColor: '#FAF5FF' },
-  schedEventChip: { borderRadius: 4, borderWidth: 1, padding: 4, marginBottom: 2 },
-  schedEventChipText: { fontSize: 10, lineHeight: 13 },
+  schedEventChip: { borderRadius: 4, borderWidth: 1, padding: 4, marginBottom: 2, overflow: 'hidden' },
+  schedEventChipText: { fontSize: 11, lineHeight: 14 },
   schedPlusBtn: { alignItems: 'center', justifyContent: 'center', opacity: 0.2 },
   schedPlusBtnText: { fontSize: 14, color: '#94A3B8' },
 

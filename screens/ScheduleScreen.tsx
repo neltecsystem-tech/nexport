@@ -90,9 +90,16 @@ export default function ScheduleScreen({ onBack, currentUserId }: Props) {
     if (data) setSchedules(data as Schedule[]);
   }, [currentYear, currentMonth, filterUserId]);
 
+  // UTC文字列をJST日付文字列に変換
+  const toJSTDateStr = (utcStr: string) => {
+    const d = new Date(utcStr);
+    d.setHours(d.getHours() + 9); // UTC → JST
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  };
+
   const getSchedulesForDate = (date: Date) => {
     const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-    return schedules.filter(s => s.start_at.startsWith(dateStr));
+    return schedules.filter(s => toJSTDateStr(s.start_at) === dateStr);
   };
 
   const openAddModal = (date?: Date) => {
@@ -109,6 +116,16 @@ export default function ScheduleScreen({ onBack, currentUserId }: Props) {
     setModalVisible(true);
   };
 
+  // UTC ISO文字列をJSTの日付・時刻に変換
+  const toJST = (utcStr: string) => {
+    const d = new Date(utcStr);
+    const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
+    return {
+      date: `${jst.getUTCFullYear()}-${String(jst.getUTCMonth() + 1).padStart(2, '0')}-${String(jst.getUTCDate()).padStart(2, '0')}`,
+      time: `${String(jst.getUTCHours()).padStart(2, '0')}:${String(jst.getUTCMinutes()).padStart(2, '0')}`,
+    };
+  };
+
   const openEditModal = (s: Schedule) => {
     if (s.user_id !== currentUserId) {
       alert('自分の予定のみ編集できます');
@@ -117,10 +134,12 @@ export default function ScheduleScreen({ onBack, currentUserId }: Props) {
     setEditTarget(s);
     setTitle(s.title);
     setDescription(s.description ?? '');
-    setStartDate(s.start_at.slice(0, 10));
-    setStartTime(s.start_at.slice(11, 16));
-    setEndDate(s.end_at.slice(0, 10));
-    setEndTime(s.end_at.slice(11, 16));
+    const startJST = toJST(s.start_at);
+    const endJST = toJST(s.end_at);
+    setStartDate(startJST.date);
+    setStartTime(startJST.time);
+    setEndDate(endJST.date);
+    setEndTime(endJST.time);
     setColor(s.color);
     setModalVisible(true);
   };
@@ -276,7 +295,7 @@ export default function ScheduleScreen({ onBack, currentUserId }: Props) {
                   <View style={styles.scheduleInfo}>
                     <Text style={styles.scheduleTitle}>{item.title}</Text>
                     <Text style={styles.scheduleMeta}>
-                      {item.profiles?.display_name} ・ {item.start_at.slice(11, 16)} 〜 {item.end_at.slice(11, 16)}
+                      {item.profiles?.display_name} ・ {toJST(item.start_at).time} 〜 {toJST(item.end_at).time}
                     </Text>
                     {item.description ? <Text style={styles.scheduleDesc} numberOfLines={1}>{item.description}</Text> : null}
                   </View>
