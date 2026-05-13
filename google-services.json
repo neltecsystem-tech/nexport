@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "946952401481",
+    "project_id": "neltecsystemprototype",
+    "storage_bucket": "neltecsystemprototype.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:946952401481:android:27b901bc2ee2e500fc8598",
+        "android_client_info": {
+          "package_name": "jp.co.neltec.nexport"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA7F9mW1Q59VT5K1H--s_Z7qIoTF5xI7lo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

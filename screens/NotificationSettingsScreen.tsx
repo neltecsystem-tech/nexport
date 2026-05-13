@@ -1,7 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, ScrollView, Switch, TextInput, Platform,
+  View, Text, TouchableOpacity, StyleSheet, ScrollView, Switch, TextInput, Platform, Alert,
 } from 'react-native';
+import * as Notifications from 'expo-notifications';
+import * as Device from 'expo-device';
+import Constants from 'expo-constants';
 import { supabase } from '../lib/supabase';
 
 type Props = { onBack: () => void };
@@ -19,8 +22,12 @@ export default function NotificationSettingsScreen({ onBack }: Props) {
 
   useEffect(() => {
     fetchSettings();
-    if (Platform.OS === 'web' && 'Notification' in window) {
-      setNotifPermission(Notification.permission);
+    if (Platform.OS === 'web') {
+      if ('Notification' in window) setNotifPermission(Notification.permission);
+    } else {
+      Notifications.getPermissionsAsync().then(({ status }) => {
+        setNotifPermission(status === 'granted' ? 'granted' : status === 'denied' ? 'denied' : 'default');
+      });
     }
   }, []);
 
@@ -55,11 +62,50 @@ export default function NotificationSettingsScreen({ onBack }: Props) {
   };
 
   const requestPermission = async () => {
-    if (Platform.OS !== 'web' || !('Notification' in window)) { alert('この環境では通知がサポートされていません'); return; }
-    const perm = await Notification.requestPermission();
-    setNotifPermission(perm);
-    if (perm === 'granted') alert('通知が有効になりました');
-    else alert('通知がブロックされています。ブラウザの設定から許可してください。');
+    if (Platform.OS === 'web') {
+      if (!('Notification' in window)) { alert('この環境では通知がサポートされていません'); return; }
+      const perm = await Notification.requestPermission();
+      setNotifPermission(perm);
+      if (perm === 'granted') alert('通知が有効になりました');
+      else alert('通知がブロックされています。ブラウザの設定から許可してください。');
+      return;
+    }
+    // Native (Android / iOS)
+    if (!Device.isDevice) {
+      Alert.alert('エミュレータでは通知できません', '実機でお試しください');
+      return;
+    }
+    const { status: req } = await Notifications.requestPermissionsAsync();
+    setNotifPermission(req === 'granted' ? 'granted' : 'denied');
+    if (req !== 'granted') {
+      Alert.alert('通知がブロックされています', 'OSの設定 → アプリ → NexPort → 通知 から許可してください');
+      return;
+    }
+    try {
+      if (Platform.OS === 'android') {
+        await Notifications.setNotificationChannelAsync('default', {
+          name: 'NexPort',
+          importance: Notifications.AndroidImportance.HIGH,
+          sound: 'default',
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: '#1A3C8F',
+        });
+      }
+      const projectId = (Constants.expoConfig as any)?.extra?.eas?.projectId ?? (Constants as any).easConfig?.projectId;
+      const tokenData = await Notifications.getExpoPushTokenAsync(projectId ? { projectId } : undefined);
+      const token = tokenData.data;
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const subscription = { endpoint: `expo:${token}`, type: 'expo', token, platform: Platform.OS };
+        await fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/web-push', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'subscribe', user_id: user.id, subscription }),
+        });
+      }
+      Alert.alert('通知が有効になりました', `トークン登録完了 (${Platform.OS})`);
+    } catch (e: any) {
+      Alert.alert('登録エラー', String(e?.message || e));
+    }
   };
 
   const Row = ({ icon, label, desc, right }: { icon: string; label: string; desc?: string; right: React.ReactNode }) => (
@@ -95,7 +141,7 @@ export default function NotificationSettingsScreen({ onBack }: Props) {
               {notifPermission === 'granted' ? '通知は有効です' : notifPermission === 'denied' ? '通知がブロックされています' : '通知が未設定です'}
             </Text>
             <Text style={s.permDesc}>
-              {notifPermission === 'granted' ? 'メッセージを受信すると通知が届きます' : 'ブラウザの通知を許可してください'}
+              {notifPermission === 'granted' ? 'メッセージを受信すると通知が届きます' : Platform.OS === 'web' ? 'ブラウザの通知を許可してください' : '通知を許可するとプッシュ通知が届きます'}
             </Text>
           </View>
           {notifPermission !== 'granted' && (

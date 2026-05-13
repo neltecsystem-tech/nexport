@@ -1,29 +1,87 @@
 import React, { useState, useEffect } from 'react';
-import { Platform } from 'react-native';
+import { Platform, View, Text, TouchableOpacity } from 'react-native';
 import { Session } from '@supabase/supabase-js';
 import { supabase } from './lib/supabase';
+import * as Notifications from 'expo-notifications';
+import * as Device from 'expo-device';
+import Constants from 'expo-constants';
 
-const VAPID_PUBLIC = 'BIj5ekLPrEUBGswQEBrhZ4djLfSGTn5LWl1hqO7T0uBlusC4NFSZxOFwls7Np5YgaJlhytgs4lbJCSIdPhF0JJc';
+const VAPID_PUBLIC = 'BMn6G55iWDnmQZ7nZ79iHX2npyXgNI6fU63HK25SV9XMHmk0aIZtQMh0r2yM3Sm0GiFdJLVPlMWoyMe7NNiM420';
+
+// Native push通知のフォアグラウンド時挙動 (バナー + サウンド + バッジ)
+if (Platform.OS !== 'web') {
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowAlert: true,
+      shouldShowBanner: true,
+      shouldShowList: true,
+      shouldPlaySound: true,
+      shouldSetBadge: true,
+    }),
+  });
+}
+
+async function registerPushWeb(userId: string) {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+  const reg = await navigator.serviceWorker.register('/sw.js');
+  await navigator.serviceWorker.ready;
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') return;
+  const sub = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: VAPID_PUBLIC,
+  });
+  const json = sub.toJSON();
+  if (!json.endpoint || !json.keys) return;
+  await fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/web-push', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'subscribe', user_id: userId, subscription: json }),
+  });
+}
+
+async function registerPushNative(userId: string) {
+  if (!Device.isDevice) {
+    console.log('Push notifications only work on physical devices');
+    return;
+  }
+  const { status: existing } = await Notifications.getPermissionsAsync();
+  let status = existing;
+  if (existing !== 'granted') {
+    const { status: req } = await Notifications.requestPermissionsAsync();
+    status = req;
+  }
+  if (status !== 'granted') return;
+
+  if (Platform.OS === 'android') {
+    await Notifications.setNotificationChannelAsync('default', {
+      name: 'NexPort',
+      importance: Notifications.AndroidImportance.HIGH,
+      sound: 'default',
+      vibrationPattern: [0, 250, 250, 250],
+      lightColor: '#1A3C8F',
+    });
+  }
+
+  const projectId = Constants.expoConfig?.extra?.eas?.projectId ?? Constants.easConfig?.projectId;
+  const tokenData = await Notifications.getExpoPushTokenAsync(projectId ? { projectId } : undefined);
+  const token = tokenData.data; // "ExponentPushToken[xxx]"
+
+  const subscription = {
+    endpoint: `expo:${token}`,
+    type: 'expo',
+    token,
+    platform: Platform.OS,
+  };
+  await fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/web-push', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'subscribe', user_id: userId, subscription }),
+  });
+}
 
 async function registerPush(userId: string) {
-  if (Platform.OS !== 'web' || !('serviceWorker' in navigator) || !('PushManager' in window)) return;
   try {
-    const reg = await navigator.serviceWorker.register('/sw.js');
-    await navigator.serviceWorker.ready;
-    const permission = await Notification.requestPermission();
-    if (permission !== 'granted') return;
-    const sub = await reg.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: VAPID_PUBLIC,
-    });
-    const json = sub.toJSON();
-    if (!json.endpoint || !json.keys) return;
-    await supabase.from('push_subscriptions').upsert({
-      user_id: userId,
-      endpoint: json.endpoint,
-      p256dh: json.keys.p256dh,
-      auth: json.keys.auth,
-    }, { onConflict: 'user_id,endpoint' });
+    if (Platform.OS === 'web') await registerPushWeb(userId);
+    else await registerPushNative(userId);
   } catch (e) {
     console.log('Push registration failed:', e);
   }
@@ -136,7 +194,7 @@ export default function App() {
     };
 
     const goAway = () => {
-      updateOnlineStatus(currentUserId, 'away');
+      updateOnlineStatus(currentUserId, 'offline');
       if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
       // 通知チャンネル以外のRealtimeを切断（バッテリー節約）
       supabase.getChannels().forEach(ch => {
@@ -328,16 +386,42 @@ export default function App() {
     return <PendingApprovalScreen onLogout={handleLogout} />;
   }
 
-  // ラッパー: 全画面に通話オーバーレイを重ねる
-  const withCallOverlay = (screen: React.ReactElement) => (
+  // 強制リロード（キャッシュクリア）
+  const forceReload = async () => {
+    if (Platform.OS !== 'web') return;
+    try {
+      // Service Workerのキャッシュをクリア
+      if ('caches' in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map(k => caches.delete(k)));
+      }
+      // Service Workerを更新
+      if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map(r => r.update()));
+      }
+      window.location.reload();
+    } catch (_) {
+      window.location.reload();
+    }
+  };
+
+  // ラッパー: 全画面に通話オーバーレイ + 更新ボタンを重ねる
+  const withCallOverlay = (screen: React.ReactElement, showRefresh = true) => (
     <View style={{ flex: 1 }}>
       {screen}
       {voiceCallOverlay}
+      {showRefresh && <TouchableOpacity
+        onPress={forceReload}
+        style={{ position: 'absolute', bottom: 20, right: 20, width: 48, height: 48, borderRadius: 24, backgroundColor: '#1A3C8F', justifyContent: 'center', alignItems: 'center', shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 6, elevation: 5, zIndex: 100 }}
+      >
+        <Text style={{ fontSize: 20, color: '#fff' }}>🔄</Text>
+      </TouchableOpacity>}
     </View>
   );
 
   if (currentScreen === 'business') {
-    return withCallOverlay(<BusinessScreen onBack={() => setCurrentScreen('channels')} currentUserId={currentUserId} isAdmin={isAdmin} />);
+    return withCallOverlay(<BusinessScreen onBack={() => setCurrentScreen('channels')} currentUserId={currentUserId} isAdmin={isAdmin} />, false);
   }
   if (currentScreen === 'admin' && isAdmin) {
     return withCallOverlay(<AdminScreen onBack={() => setCurrentScreen('channels')} currentUserId={currentUserId} isSuperAdmin={isSuperAdmin} />);
@@ -349,13 +433,14 @@ export default function App() {
     return withCallOverlay(<SearchScreen onBack={() => setCurrentScreen('channels')} onSelectChannel={(id, name) => { setCurrentChannel({ id, name }); setCurrentScreen('chat'); }} />);
   }
   if (currentScreen === 'dm' && dmPartner && currentUserId) {
-    return withCallOverlay(<DMScreen onBack={() => setCurrentScreen('members')} partnerId={dmPartner.id} partnerName={dmPartner.name} currentUserId={currentUserId} onStartCall={() => voiceCall.startCall(dmPartner.id, dmPartner.name)} />);
+    return withCallOverlay(<DMScreen onBack={() => setCurrentScreen('members')} partnerId={dmPartner.id} partnerName={dmPartner.name} currentUserId={currentUserId} onStartCall={() => voiceCall.startCall(dmPartner.id, dmPartner.name)} />, false);
   }
   if (currentScreen === 'members') {
     return withCallOverlay(
       <MemberListScreen
         onBack={() => setCurrentScreen('channels')}
         onStartDM={(partnerId, partnerName) => { setDmPartner({ id: partnerId, name: partnerName }); setCurrentScreen('dm'); }}
+        onStartCall={(partnerId, partnerName) => voiceCall.startCall(partnerId, partnerName)}
         currentUserId={currentUserId}
       />
     );
@@ -379,7 +464,7 @@ export default function App() {
         onBack={() => setCurrentScreen('channels')}
         onOpenTabs={() => setCurrentScreen('channel_tabs')}
         isAdmin={isAdmin}
-      />
+      />, false
     );
   }
 
