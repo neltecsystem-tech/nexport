@@ -6,6 +6,7 @@ import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import Constants from 'expo-constants';
 import notifee from '@notifee/react-native';
+import * as Badger from './modules/badger';
 
 const VAPID_PUBLIC = 'BMn6G55iWDnmQZ7nZ79iHX2npyXgNI6fU63HK25SV9XMHmk0aIZtQMh0r2yM3Sm0GiFdJLVPlMWoyMe7NNiM420';
 
@@ -277,8 +278,9 @@ export default function App() {
         }
       } catch (_) {}
     } else {
-      // Native: notifee で数値バッジ (Sony/Samsung/Huawei等のメーカー専用 Intent を内部 broadcast)
-      // 加えて expo-notifications でも設定（OS標準API用）
+      // Native: ShortcutBadger (Sony/Samsung/Huawei等のランチャー独自 Intent broadcast)
+      // notifee.setBadgeCount は Samsung ContentProvider + 通知バッジ用、ホーム数値には届かない
+      try { Badger.setBadgeCount(n); } catch (_) {}
       notifee.setBadgeCount(n).catch(() => {});
       Notifications.setBadgeCountAsync(n).catch(() => {});
     }
