@@ -31,6 +31,7 @@
         "android.permission.VIBRATE",
         "android.permission.POST_NOTIFICATIONS",
         "com.sonymobile.home.permission.PROVIDER_INSERT_BADGE",
+        "com.sonyericsson.home.permission.BROADCAST_BADGE",
         "com.sec.android.provider.badge.permission.READ",
         "com.sec.android.provider.badge.permission.WRITE",
         "com.htc.launcher.permission.READ_SETTINGS",
