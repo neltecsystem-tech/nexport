@@ -79,13 +79,14 @@ export default function DMChatScreen({ onBack, partnerId, partnerName, currentUs
       receiver_id: partnerId,
       content,
     });
-    // Push通知
+    // Push通知 (web-push EF: Web Push + Expo Native push 両対応)
     try {
       const { data: prof } = await supabase.from('profiles').select('display_name').eq('id', currentUserId).single();
-      fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/send-push', {
+      fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/web-push', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          action: 'send',
           user_ids: [partnerId],
           title: `💬 DM`,
           body: `${prof?.display_name ?? ''}: ${content.slice(0, 100)}`,
