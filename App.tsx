@@ -5,6 +5,7 @@ import { supabase } from './lib/supabase';
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import Constants from 'expo-constants';
+import notifee from '@notifee/react-native';
 
 const VAPID_PUBLIC = 'BMn6G55iWDnmQZ7nZ79iHX2npyXgNI6fU63HK25SV9XMHmk0aIZtQMh0r2yM3Sm0GiFdJLVPlMWoyMe7NNiM420';
 
@@ -267,16 +268,19 @@ export default function App() {
 
   // アプリアイコンバッジ更新（Web PWA + ネイティブ両対応）
   const updateAppBadge = (count: number) => {
+    const n = Math.max(0, count);
     if (Platform.OS === 'web') {
       try {
         if ('setAppBadge' in navigator) {
-          if (count > 0) (navigator as any).setAppBadge(count);
+          if (n > 0) (navigator as any).setAppBadge(n);
           else (navigator as any).clearAppBadge();
         }
       } catch (_) {}
     } else {
-      // Native (Android/iOS): expo-notifications でバッジ設定
-      Notifications.setBadgeCountAsync(Math.max(0, count)).catch(() => {});
+      // Native: notifee で数値バッジ (Sony/Samsung/Huawei等のメーカー専用 Intent を内部 broadcast)
+      // 加えて expo-notifications でも設定（OS標準API用）
+      notifee.setBadgeCount(n).catch(() => {});
+      Notifications.setBadgeCountAsync(n).catch(() => {});
     }
   };
 
