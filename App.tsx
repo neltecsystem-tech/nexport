@@ -280,20 +280,30 @@ export default function App() {
     }
   };
 
-  // 未読バッジカウンター
+  // 未読バッジカウンター (ネイティブ用、push受信時の即時インクリメント用)
   const unreadBadgeRef = React.useRef(0);
 
-  // ネイティブ: AppState でフォアグラウンド復帰時にバッジリセット
+  // DB から実際の未読数を取得してバッジに反映
+  const refreshBadgeFromDB = React.useCallback(async () => {
+    if (!currentUserId) return;
+    try {
+      const { data, error } = await supabase.rpc('get_user_unread_count', { p_user_id: currentUserId });
+      if (error) return;
+      const count = typeof data === 'number' ? data : 0;
+      unreadBadgeRef.current = count;
+      updateAppBadge(count);
+    } catch (_) {}
+  }, [currentUserId]);
+
+  // ネイティブ: AppState で フォアグラウンド復帰時に DBから未読数を再取得
   useEffect(() => {
     if (!currentUserId || Platform.OS === 'web') return;
+    refreshBadgeFromDB(); // マウント時に1回
     const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active') {
-        unreadBadgeRef.current = 0;
-        updateAppBadge(0);
-      }
+      if (state === 'active') refreshBadgeFromDB();
     });
     return () => sub.remove();
-  }, [currentUserId]);
+  }, [currentUserId, refreshBadgeFromDB]);
 
   // ネイティブ: 受信した push 通知でバッジカウントを進める (フォアグラウンド時はnoop)
   useEffect(() => {
@@ -306,6 +316,38 @@ export default function App() {
     });
     return () => recvSub.remove();
   }, [currentUserId]);
+
+  // ネイティブ: realtimeで新着メッセージを監視、未読数を更新
+  useEffect(() => {
+    if (!currentUserId || Platform.OS === 'web') return;
+    const ch = supabase
+      .channel('native-unread-' + currentUserId)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, async (payload) => {
+        const msg = payload.new as any;
+        if (msg.sender_id === currentUserId) return;
+        // 自分が参加しているチャンネルか確認
+        const { data: mem } = await supabase.from('channel_members').select('user_id').eq('channel_id', msg.channel_id).eq('user_id', currentUserId).maybeSingle();
+        if (!mem) return;
+        if (AppState.currentState === 'active') refreshBadgeFromDB();
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'direct_messages' }, (payload) => {
+        const dm = payload.new as any;
+        if (dm.receiver_id !== currentUserId) return;
+        if (AppState.currentState === 'active') refreshBadgeFromDB();
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'message_reads' }, (payload) => {
+        const mr = payload.new as any;
+        if (mr.user_id !== currentUserId) return;
+        if (AppState.currentState === 'active') refreshBadgeFromDB();
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'direct_messages' }, (payload) => {
+        const dm = payload.new as any;
+        if (dm.receiver_id !== currentUserId) return;
+        if (AppState.currentState === 'active') refreshBadgeFromDB();
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [currentUserId, refreshBadgeFromDB]);
 
   // グローバル通知監視: 常時接続（フォアグラウンド時は通知音、バックグラウンド時はポップアップ通知）
   useEffect(() => {

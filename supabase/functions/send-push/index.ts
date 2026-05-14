@@ -152,12 +152,22 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    const payloadObj: any = { title, body: body || '', url: url || '/' };
-    if (typeof badge === 'number') payloadObj.badge = badge;
-    const payload = JSON.stringify(payloadObj);
+    // 各ユーザーの未読数を事前取得 (badge引数があれば優先)
+    const unreadByUser: Record<string, number> = {};
+    await Promise.all((user_ids as string[]).map(async (uid: string) => {
+      try {
+        const { data } = await adminSupabase.rpc('get_user_unread_count', { p_user_id: uid });
+        unreadByUser[uid] = typeof data === 'number' ? data : 0;
+      } catch { unreadByUser[uid] = 0; }
+    }));
+
+    const basePayload: any = { title, body: body || '', url: url || '/' };
     let sent = 0;
     for (const sub of subs) {
       let status = 0;
+      const userBadge = typeof badge === 'number' ? badge : (unreadByUser[sub.user_id] ?? 0);
+      const payloadObj = { ...basePayload, badge: userBadge };
+      const payload = JSON.stringify(payloadObj);
       if (typeof sub.endpoint === 'string' && sub.endpoint.startsWith('expo:')) {
         const token = sub.endpoint.slice(5);
         status = await sendExpoPush(token, payloadObj);

@@ -155,13 +155,24 @@ Deno.serve(async (req) => {
       if (!targetIds.length) throw new Error('user_id or user_ids required');
 
       const { data: subs } = await supabaseAdmin.from('push_subscriptions').select('*').in('user_id', targetIds);
-      const payloadObj = { title: title || 'NexPort', body: body || '', url: url || '/', tag: 'nexport-' + Date.now() };
-      const payloadStr = JSON.stringify(payloadObj);
+      const basePayload = { title: title || 'NexPort', body: body || '', url: url || '/', tag: 'nexport-' + Date.now() };
+
+      // 各ユーザーごとの未読数を事前取得（バッジ用）
+      const unreadByUser: Record<string, number> = {};
+      await Promise.all(targetIds.map(async (uid: string) => {
+        try {
+          const { data } = await supabaseAdmin.rpc('get_user_unread_count', { p_user_id: uid });
+          unreadByUser[uid] = typeof data === 'number' ? data : 0;
+        } catch { unreadByUser[uid] = 0; }
+      }));
 
       let sent = 0, failed = 0;
       const errors: string[] = [];
       for (const sub of (subs || [])) {
         try {
+          const userBadge = unreadByUser[sub.user_id] ?? 0;
+          const payloadObj: any = { ...basePayload, badge: userBadge };
+          const payloadStr = JSON.stringify(payloadObj);
           if (typeof sub.endpoint === 'string' && sub.endpoint.startsWith('expo:')) {
             const token = sub.endpoint.slice(5);
             await sendExpoPush(token, payloadObj);
