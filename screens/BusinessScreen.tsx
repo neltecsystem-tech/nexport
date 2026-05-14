@@ -2668,22 +2668,31 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                 ))}
               </View>
               <Text style={styles.fLabel}>期限</Text>
-              {/* @ts-ignore Web only */}
-              <input
-                type="date"
-                value={taskDue}
-                onChange={(e: any) => setTaskDue(e.target.value)}
-                style={{
-                  padding: 10,
-                  fontSize: 14,
-                  borderRadius: 8,
-                  border: '1px solid #E5E7EB',
-                  backgroundColor: '#fff',
-                  color: '#111827',
-                  marginBottom: 12,
-                  fontFamily: 'inherit',
-                }}
-              />
+              {Platform.OS === 'web' ? (
+                // @ts-ignore Web only HTML input
+                <input
+                  type="date"
+                  value={taskDue}
+                  onChange={(e: any) => setTaskDue(e.target.value)}
+                  style={{
+                    padding: 10,
+                    fontSize: 14,
+                    borderRadius: 8,
+                    border: '1px solid #E5E7EB',
+                    backgroundColor: '#fff',
+                    color: '#111827',
+                    marginBottom: 12,
+                    fontFamily: 'inherit',
+                  }}
+                />
+              ) : (
+                <TextInput
+                  value={taskDue}
+                  onChangeText={setTaskDue}
+                  placeholder="YYYY-MM-DD"
+                  style={styles.fInput}
+                />
+              )}
               <Text style={styles.fLabel}>担当者 (複数選択可)</Text>
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 16 }}>
                 {members.map(m => {
@@ -3247,11 +3256,21 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                 <View style={{ flexDirection: 'row', gap: 12 }}>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.fLabel}>開始時刻</Text>
-                    <input type="time" value={evStart} onChange={e => setEvStart(e.target.value)} style={{ padding: 10, fontSize: 15, borderRadius: 8, border: '1px solid #ddd', width: '100%', boxSizing: 'border-box' as any }} />
+                    {Platform.OS === 'web' ? (
+                      // @ts-ignore Web only HTML input
+                      <input type="time" value={evStart} onChange={e => setEvStart(e.target.value)} style={{ padding: 10, fontSize: 15, borderRadius: 8, border: '1px solid #ddd', width: '100%', boxSizing: 'border-box' as any }} />
+                    ) : (
+                      <TextInput style={styles.fInput} value={evStart} onChangeText={setEvStart} placeholder="HH:MM" keyboardType="numbers-and-punctuation" />
+                    )}
                   </View>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.fLabel}>終了時刻</Text>
-                    <input type="time" value={evEnd} onChange={e => setEvEnd(e.target.value)} style={{ padding: 10, fontSize: 15, borderRadius: 8, border: '1px solid #ddd', width: '100%', boxSizing: 'border-box' as any }} />
+                    {Platform.OS === 'web' ? (
+                      // @ts-ignore Web only HTML input
+                      <input type="time" value={evEnd} onChange={e => setEvEnd(e.target.value)} style={{ padding: 10, fontSize: 15, borderRadius: 8, border: '1px solid #ddd', width: '100%', boxSizing: 'border-box' as any }} />
+                    ) : (
+                      <TextInput style={styles.fInput} value={evEnd} onChangeText={setEvEnd} placeholder="HH:MM" keyboardType="numbers-and-punctuation" />
+                    )}
                   </View>
                 </View>
 

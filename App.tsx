@@ -99,6 +99,7 @@ import NotificationSettingsScreen from './screens/NotificationSettingsScreen';
 import ChannelTabScreen from './screens/ChannelTabScreen';
 import PendingApprovalScreen from './screens/PendingApprovalScreen';
 import BusinessScreen from './screens/BusinessScreen';
+import { ErrorBoundary } from './lib/ErrorBoundary';
 import VoiceCallScreen from './screens/VoiceCallScreen';
 import { useVoiceCall } from './lib/useVoiceCall';
 
@@ -449,7 +450,12 @@ export default function App() {
   );
 
   if (currentScreen === 'business') {
-    return withCallOverlay(<BusinessScreen onBack={() => setCurrentScreen('channels')} currentUserId={currentUserId} isAdmin={isAdmin} />, false);
+    return withCallOverlay(
+      <ErrorBoundary onReset={() => setCurrentScreen('channels')}>
+        <BusinessScreen onBack={() => setCurrentScreen('channels')} currentUserId={currentUserId} isAdmin={isAdmin} />
+      </ErrorBoundary>,
+      false,
+    );
   }
   if (currentScreen === 'admin' && isAdmin) {
     return withCallOverlay(<AdminScreen onBack={() => setCurrentScreen('channels')} currentUserId={currentUserId} isSuperAdmin={isSuperAdmin} />);
