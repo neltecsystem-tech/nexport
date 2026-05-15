@@ -467,6 +467,13 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   const [rpComment,      setRpComment]      = useState('');
   const [savingReport,   setSavingReport]   = useState(false);
   const [loadingReports, setLoadingReports] = useState(false);
+  // 報告書AI
+  const [aiQueryModal,   setAiQueryModal]   = useState(false);
+  const [aiQuestion,     setAiQuestion]     = useState('');
+  const [aiAnswer,       setAiAnswer]       = useState('');
+  const [aiLoading,      setAiLoading]      = useState(false);
+  const [aiDraftLoading, setAiDraftLoading] = useState(false);
+  const [aiDraftNotes,   setAiDraftNotes]   = useState('');
   const [reportNotifs,   setReportNotifs]   = useState<{ id: string; report_id: string; report_title: string; report_date: string; author_name: string }[]>([]);
 
   // ── Mail ──────────────────────────────────────────────────
@@ -1819,6 +1826,58 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
     setRpComment('');
     sendReportCommentEmail(r, content, 'comment');
   };
+
+  // ── 報告書AI ──
+  const askReportAI = async () => {
+    const q = aiQuestion.trim();
+    if (!q) { alert('質問を入力してください'); return; }
+    setAiLoading(true);
+    setAiAnswer('');
+    try {
+      const { data, error } = await supabase.functions.invoke('report-ai', {
+        body: { action: 'query', question: q },
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      setAiAnswer(data?.answer || '(回答なし)');
+    } catch (e: any) {
+      setAiAnswer('エラー: ' + (e?.message || String(e)));
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const generateReportDraft = async () => {
+    if (!rpTitle.trim()) { alert('まずタイトルを入力してください (AIがそれを元にドラフトを作成します)'); return; }
+    setAiDraftLoading(true);
+    try {
+      const participantNames = rpParticipantIds
+        .map(id => members.find(m => m.id === id)?.display_name)
+        .filter(Boolean).join(', ');
+      const { data, error } = await supabase.functions.invoke('report-ai', {
+        body: {
+          action: 'draft',
+          topic: rpTitle,
+          category: rpCategory,
+          report_date: rpDate,
+          participants: participantNames,
+          external_participants: rpExtParticipants,
+          notes: aiDraftNotes,
+        },
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      if (data?.draft) {
+        setRpContent(prev => prev ? prev + '\n\n' + data.draft : data.draft);
+        setAiDraftNotes('');
+      }
+    } catch (e: any) {
+      alert('AIドラフト生成失敗: ' + (e?.message || String(e)));
+    } finally {
+      setAiDraftLoading(false);
+    }
+  };
+
 
   const deleteReport = async (r: Report) => {
     if (!await confirmDialog(`「${r.title}」を削除しますか？`)) return;
@@ -4618,9 +4677,14 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
     return (
       <View style={styles.container}>
         {renderHeader('📝 報告書',
-          <TouchableOpacity style={[styles.headerAddBtn, { backgroundColor: '#EC4899' }]} onPress={openNewReport}>
-            <Text style={styles.headerAddBtnText}>＋ 作成</Text>
-          </TouchableOpacity>
+          <View style={{ flexDirection: 'row', gap: 6 }}>
+            <TouchableOpacity style={[styles.headerAddBtn, { backgroundColor: '#8B5CF6' }]} onPress={() => { setAiQueryModal(true); setAiAnswer(''); setAiQuestion(''); }}>
+              <Text style={styles.headerAddBtnText}>🤖 AIに聞く</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.headerAddBtn, { backgroundColor: '#EC4899' }]} onPress={openNewReport}>
+              <Text style={styles.headerAddBtnText}>＋ 作成</Text>
+            </TouchableOpacity>
+          </View>
         )}
 
         {/* 新着報告書のお知らせバナー */}
@@ -4853,6 +4917,23 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                 <TextInput style={styles.fInput} value={rpExtParticipants} onChangeText={setRpExtParticipants} placeholder="例: 株式会社〇〇 山田様, △△商事 鈴木様" />
 
                 <Text style={styles.fLabel}>本文</Text>
+                {/* AIドラフト生成 */}
+                <View style={{ marginBottom: 8, padding: 10, borderRadius: 8, backgroundColor: '#F5F3FF', borderWidth: 1, borderColor: '#DDD6FE' }}>
+                  <Text style={{ fontSize: 11, color: '#6D28D9', marginBottom: 6, fontWeight: '600' }}>🤖 AIドラフト生成 (過去の報告書を参考に本文を自動作成)</Text>
+                  <TextInput
+                    style={[styles.fInput, { minHeight: 50, textAlignVertical: 'top', marginBottom: 6, fontSize: 13 }]}
+                    value={aiDraftNotes} onChangeText={setAiDraftNotes} multiline
+                    placeholder="任意: 補足メモ (例: 「△△商事との初回打合せ、議題は新規物流案件」)"
+                  />
+                  <TouchableOpacity
+                    style={{ backgroundColor: '#8B5CF6', paddingVertical: 10, borderRadius: 6, alignItems: 'center', opacity: aiDraftLoading ? 0.6 : 1 }}
+                    onPress={generateReportDraft} disabled={aiDraftLoading}
+                  >
+                    <Text style={{ color: '#fff', fontSize: 13, fontWeight: '600' }}>
+                      {aiDraftLoading ? '⏳ 生成中... (10〜20秒かかります)' : '✏️ AIでドラフト生成 / 追記'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
                 <TextInput
                   style={[styles.fInput, { minHeight: 200, textAlignVertical: 'top' }]}
                   value={rpContent} onChangeText={setRpContent} multiline
@@ -4870,6 +4951,44 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                     <Text style={styles.submitBtnText}>提出</Text>
                   </TouchableOpacity>
                 </View>
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
+
+        {/* 報告書AI 質問モーダル */}
+        <Modal visible={aiQueryModal} transparent animationType="slide" onRequestClose={() => setAiQueryModal(false)}>
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalSheet, { maxHeight: '92%' }]}>
+              <View style={styles.modalTop}>
+                <Text style={styles.modalTitle}>🤖 報告書AI</Text>
+                <TouchableOpacity onPress={() => setAiQueryModal(false)}><Text style={styles.modalClose}>✕</Text></TouchableOpacity>
+              </View>
+              <ScrollView showsVerticalScrollIndicator={false}>
+                <Text style={{ fontSize: 12, color: '#64748B', marginBottom: 10, lineHeight: 18 }}>
+                  過去の社内報告書だけを根拠に回答します。報告書にない情報には「記載がありません」と返します。
+                </Text>
+                <Text style={styles.fLabel}>質問</Text>
+                <TextInput
+                  style={[styles.fInput, { minHeight: 80, textAlignVertical: 'top' }]}
+                  value={aiQuestion} onChangeText={setAiQuestion} multiline
+                  placeholder={'例: 「△△商事との打ち合わせ履歴は？」\n例: 「先月の安否確認関連の報告書を要約して」'}
+                />
+                <TouchableOpacity
+                  style={{ backgroundColor: '#8B5CF6', paddingVertical: 12, borderRadius: 8, alignItems: 'center', marginTop: 4, opacity: aiLoading ? 0.6 : 1 }}
+                  onPress={askReportAI} disabled={aiLoading}
+                >
+                  <Text style={{ color: '#fff', fontSize: 14, fontWeight: '600' }}>
+                    {aiLoading ? '⏳ AIが回答中... (10〜20秒)' : '🔍 質問する'}
+                  </Text>
+                </TouchableOpacity>
+
+                {aiAnswer ? (
+                  <View style={{ marginTop: 16, padding: 12, borderRadius: 8, backgroundColor: '#F5F3FF', borderWidth: 1, borderColor: '#DDD6FE' }}>
+                    <Text style={{ fontSize: 11, color: '#6D28D9', marginBottom: 6, fontWeight: '700' }}>AIの回答</Text>
+                    <Text selectable style={{ fontSize: 13, color: '#1E293B', lineHeight: 20 }}>{aiAnswer}</Text>
+                  </View>
+                ) : null}
               </ScrollView>
             </View>
           </View>
