@@ -37,13 +37,20 @@ jobs:
       - name: Verify build output
         run: ls -la dist && find dist -maxdepth 3 | sort
 
+      - name: Normalize FTP path (ensure trailing slash)
+        id: normalize
+        run: |
+          SD="${{ secrets.FTP_PATH }}"
+          [[ "$SD" != */ ]] && SD="$SD/"
+          echo "ftp_path=$SD" >> $GITHUB_OUTPUT
+
       - name: Deploy to Xserver via FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ secrets.FTP_HOST }}
           username: ${{ secrets.FTP_USERNAME }}
           password: ${{ secrets.FTP_PASSWORD }}
-          server-dir: ${{ secrets.FTP_PATH }}
+          server-dir: ${{ steps.normalize.outputs.ftp_path }}
           local-dir: ./dist/
           protocol: ftp
           dangerous-clean-slate: false
