@@ -2962,38 +2962,30 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                     <View>
                       {filteredMembers.map(member => {
                         const memberEvs = filteredEvents.filter(e => e.user_id === member.id);
-                        // 複数日イベントの表示済みID
-                        const renderedMultiDay = new Set<string>();
+                        // 週内に登場する複数日イベントを抽出
+                        const multiDayEvs = memberEvs.filter(e => {
+                          const endD = e.end_date || e.event_date;
+                          if (endD <= e.event_date) return false;
+                          return weekDays.some(wd => evOnDate(e, dateStr(wd)));
+                        });
+                        const MULTI_BAR_H = 22;
+                        const multiPadTop = multiDayEvs.length > 0 ? (multiDayEvs.length * MULTI_BAR_H + 4) : 0;
                         return (
                         <View key={member.id} style={[styles.schedMemberRow, { position: 'relative' }]}>
                           <View style={styles.schedMemberCell}><Text style={styles.schedMemberName} numberOfLines={2}>{member.display_name}</Text></View>
                           {weekDays.map((day, i) => {
                             const ds = dateStr(day);
-                            const dayEvs = memberEvs.filter(e => evOnDate(e, ds));
+                            // 単日のみ
+                            const dayEvs = memberEvs.filter(e => {
+                              const endD = e.end_date || e.event_date;
+                              return endD === e.event_date && evOnDate(e, ds);
+                            });
                             const hol = isHoliday(day);
                             return (
-                              <TouchableOpacity key={i} style={[styles.schedDayCell, isToday(day) && styles.schedDayCellToday, i === 5 && { backgroundColor: '#F8FAFF' }, i === 6 && { backgroundColor: '#FFF8F8' }, hol && !isToday(day) && { backgroundColor: '#FFF1F2' }]} onPress={() => openAddEvent(member.id, ds)}>
+                              <TouchableOpacity key={i} style={[styles.schedDayCell, { paddingTop: 4 + multiPadTop }, isToday(day) && styles.schedDayCellToday, i === 5 && { backgroundColor: '#F8FAFF' }, i === 6 && { backgroundColor: '#FFF8F8' }, hol && !isToday(day) && { backgroundColor: '#FFF1F2' }]} onPress={() => openAddEvent(member.id, ds)}>
                                 {dayEvs.map(ev => {
                                   const c = EVENT_TYPE_COLORS[ev.event_type];
-                                  const endD = ev.end_date || ev.event_date;
-                                  const isMulti = endD > ev.event_date;
                                   const done = !!ev.completed_at;
-                                  // 複数日: 開始日or週の最初の日のみ表示
-                                  if (isMulti) {
-                                    if (renderedMultiDay.has(ev.id)) return null;
-                                    renderedMultiDay.add(ev.id);
-                                    // この週で何日分か計算
-                                    const startIdx = Math.max(0, weekDays.findIndex(wd => dateStr(wd) >= ev.event_date));
-                                    const endIdx = Math.min(6, weekDays.findIndex(wd => dateStr(wd) >= endD));
-                                    const spanDays = (endIdx >= 0 ? endIdx : 6) - i + 1;
-                                    return (
-                                      <TouchableOpacity key={ev.id} style={[{ backgroundColor: c.bg, borderColor: c.border, borderWidth: 1, borderRadius: 4, padding: 3, marginBottom: 2, width: spanDays * 130 - 8, zIndex: 5 }, done && { opacity: 0.5 }]} onPress={(e) => { (e as any).stopPropagation?.(); openEditEvent(ev); }}>
-                                        <Text style={[styles.schedEventChipText, { color: c.text, textDecorationLine: done ? 'line-through' : 'none' }]} numberOfLines={1}>
-                                          {done ? '✅ ' : ''}{ev.event_date.slice(5)}〜{endD.slice(5)} {ev.title}
-                                        </Text>
-                                      </TouchableOpacity>
-                                    );
-                                  }
                                   return (
                                     <TouchableOpacity key={ev.id} style={[styles.schedEventChip, { backgroundColor: c.bg, borderColor: c.border }, done && { opacity: 0.5 }]} onPress={(e) => { (e as any).stopPropagation?.(); openEditEvent(ev); }}>
                                       <Text style={[styles.schedEventChipText, { color: c.text, textDecorationLine: done ? 'line-through' : 'none' }]} numberOfLines={3}>
@@ -3005,6 +2997,42 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                                   );
                                 })}
                                 <View style={styles.schedPlusBtn}><Text style={styles.schedPlusBtnText}>＋</Text></View>
+                              </TouchableOpacity>
+                            );
+                          })}
+                          {/* 複数日イベント帯（行上部に絶対配置、単日カードと干渉しない） */}
+                          {multiDayEvs.map((ev, idx) => {
+                            const c = EVENT_TYPE_COLORS[ev.event_type];
+                            const done = !!ev.completed_at;
+                            const endD = ev.end_date || ev.event_date;
+                            let startIdx = weekDays.findIndex(wd => dateStr(wd) >= ev.event_date);
+                            if (startIdx < 0) startIdx = 0;
+                            let endIdx = 6;
+                            for (let k = 6; k >= 0; k--) { if (dateStr(weekDays[k]) <= endD) { endIdx = k; break; } }
+                            const spanDays = Math.max(1, endIdx - startIdx + 1);
+                            return (
+                              <TouchableOpacity
+                                key={ev.id}
+                                style={{
+                                  position: 'absolute',
+                                  top: 4 + idx * MULTI_BAR_H,
+                                  left: 90 + startIdx * 130 + 2,
+                                  width: spanDays * 130 - 4,
+                                  height: MULTI_BAR_H - 2,
+                                  backgroundColor: c.bg,
+                                  borderColor: c.border,
+                                  borderWidth: 1,
+                                  borderRadius: 4,
+                                  paddingHorizontal: 4,
+                                  justifyContent: 'center',
+                                  zIndex: 10,
+                                  opacity: done ? 0.5 : 1,
+                                }}
+                                onPress={(e) => { (e as any).stopPropagation?.(); openEditEvent(ev); }}
+                              >
+                                <Text style={[styles.schedEventChipText, { color: c.text, textDecorationLine: done ? 'line-through' : 'none' }]} numberOfLines={1}>
+                                  {done ? '✅ ' : ''}{ev.event_date.slice(5)}〜{endD.slice(5)} {ev.title}
+                                </Text>
                               </TouchableOpacity>
                             );
                           })}
