@@ -370,6 +370,10 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   const [pinnedPost,   setPinnedPost]   = useState<BulletinPost | null>(null);
   const [logisticsItems, setLogisticsItems] = useState<{title:string;link:string;pubDate:string;summary:string;image:string;source:string}[]>([]);
   const logisticsAnimsRef = useRef<Animated.Value[]>([]);
+  // 週表示の日付ヘッダーと本体行の横スクロール同期用
+  const schedWeekHeaderScrollRef = useRef<ScrollView>(null);
+  const schedWeekBodyScrollRef = useRef<ScrollView>(null);
+  const schedWeekSyncingRef = useRef(false);
   // ニュース弾幕（1行マーキー）用
   const newsMarqueeAnim = useRef(new Animated.Value(0)).current;
   const [newsMarqueeWidth, setNewsMarqueeWidth] = useState(0);
@@ -2911,22 +2915,51 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
             {schedView === 'week' && (() => {
               const mon = getMonday(schedNavDate);
               const weekDays = Array.from({ length: 7 }, (_, i) => { const d = new Date(mon); d.setDate(d.getDate() + i); return d; });
+              const onHeaderScroll = (e: any) => {
+                if (schedWeekSyncingRef.current) return;
+                schedWeekSyncingRef.current = true;
+                schedWeekBodyScrollRef.current?.scrollTo({ x: e.nativeEvent.contentOffset.x, animated: false });
+                requestAnimationFrame(() => { schedWeekSyncingRef.current = false; });
+              };
+              const onBodyScroll = (e: any) => {
+                if (schedWeekSyncingRef.current) return;
+                schedWeekSyncingRef.current = true;
+                schedWeekHeaderScrollRef.current?.scrollTo({ x: e.nativeEvent.contentOffset.x, animated: false });
+                requestAnimationFrame(() => { schedWeekSyncingRef.current = false; });
+              };
               return (
-                <ScrollView style={{ flex: 1 }}>
-                  <ScrollView horizontal showsHorizontalScrollIndicator>
+                <ScrollView style={{ flex: 1 }} stickyHeaderIndices={[0]}>
+                  {/* 0: 日付ヘッダー（縦スクロール時に sticky） */}
+                  <ScrollView
+                    ref={schedWeekHeaderScrollRef}
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    scrollEventThrottle={16}
+                    onScroll={onHeaderScroll}
+                    style={{ backgroundColor: '#F8FAFC' }}
+                  >
+                    <View style={styles.schedHeaderRow}>
+                      <View style={[styles.schedMemberCell, { backgroundColor: '#F8FAFC' }]}><Text style={styles.schedMemberHeader}>メンバー</Text></View>
+                      {weekDays.map((day, i) => {
+                        const hol = isHoliday(day);
+                        return (
+                        <View key={i} style={[styles.schedDayHeader, isToday(day) && styles.schedDayHeaderToday, hol && !isToday(day) && { backgroundColor: '#FFF1F2' }]}>
+                          <Text style={[styles.schedDayName, i === 5 && { color: '#3B82F6' }, i === 6 && { color: '#EF4444' }, hol && { color: '#EF4444' }, isToday(day) && { color: '#fff' }]}>{DAY_NAMES[day.getDay()]}</Text>
+                          <Text style={[styles.schedDayDate, hol && !isToday(day) && { color: '#EF4444' }, isToday(day) && { color: '#fff' }]}>{day.getDate()}</Text>
+                          {hol && <Text style={{ fontSize: 9, color: '#DC2626', textAlign: 'center' }} numberOfLines={1}>{hol}</Text>}
+                        </View>
+                        );})}
+                    </View>
+                  </ScrollView>
+                  {/* 1: メンバー行群（横スクロール、ヘッダーと位置同期） */}
+                  <ScrollView
+                    ref={schedWeekBodyScrollRef}
+                    horizontal
+                    showsHorizontalScrollIndicator
+                    scrollEventThrottle={16}
+                    onScroll={onBodyScroll}
+                  >
                     <View>
-                      <View style={styles.schedHeaderRow}>
-                        <View style={[styles.schedMemberCell, { backgroundColor: '#F8FAFC' }]}><Text style={styles.schedMemberHeader}>メンバー</Text></View>
-                        {weekDays.map((day, i) => {
-                          const hol = isHoliday(day);
-                          return (
-                          <View key={i} style={[styles.schedDayHeader, isToday(day) && styles.schedDayHeaderToday, hol && !isToday(day) && { backgroundColor: '#FFF1F2' }]}>
-                            <Text style={[styles.schedDayName, i === 5 && { color: '#3B82F6' }, i === 6 && { color: '#EF4444' }, hol && { color: '#EF4444' }, isToday(day) && { color: '#fff' }]}>{DAY_NAMES[day.getDay()]}</Text>
-                            <Text style={[styles.schedDayDate, hol && !isToday(day) && { color: '#EF4444' }, isToday(day) && { color: '#fff' }]}>{day.getDate()}</Text>
-                            {hol && <Text style={{ fontSize: 9, color: '#DC2626', textAlign: 'center' }} numberOfLines={1}>{hol}</Text>}
-                          </View>
-                          );})}
-                      </View>
                       {filteredMembers.map(member => {
                         const memberEvs = filteredEvents.filter(e => e.user_id === member.id);
                         // 複数日イベントの表示済みID
