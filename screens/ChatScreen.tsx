@@ -522,6 +522,9 @@ export default function ChatScreen({ channelId, channelName, onBack, onOpenTabs,
               user_ids: otherIds,
               title: `#${channelName}`,
               body: `${senderName}: ${content.slice(0, 100)}`,
+              groupId: `ch-${channelId}`,
+              groupTitle: `#${channelName}`,
+              type: 'channel',
             }),
           }).catch(() => {});
         }

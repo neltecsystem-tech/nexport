@@ -11,15 +11,20 @@ import * as Badger from './modules/badger';
 const VAPID_PUBLIC = 'BMn6G55iWDnmQZ7nZ79iHX2npyXgNI6fU63HK25SV9XMHmk0aIZtQMh0r2yM3Sm0GiFdJLVPlMWoyMe7NNiM420';
 
 // Native push通知のフォアグラウンド時挙動 (バナー + サウンド + バッジ)
+// data.groupId がある通知は OS デフォルト表示を抑制し、notifee で会話単位にグルーピング表示する
 if (Platform.OS !== 'web') {
   Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowAlert: true,
-      shouldShowBanner: true,
-      shouldShowList: true,
-      shouldPlaySound: true,
-      shouldSetBadge: true,
-    }),
+    handleNotification: async (notif) => {
+      const data = (notif?.request?.content?.data ?? {}) as any;
+      const hasGroup = !!data?.groupId && Platform.OS === 'android';
+      return {
+        shouldShowAlert: !hasGroup,
+        shouldShowBanner: !hasGroup,
+        shouldShowList: !hasGroup,
+        shouldPlaySound: !hasGroup,
+        shouldSetBadge: true,
+      };
+    },
   });
 }
 
@@ -322,6 +327,45 @@ export default function App() {
     });
     return () => recvSub.remove();
   }, [currentUserId]);
+
+  // Android: data.groupId がある通知を notifee で会話単位にグルーピング再発火
+  // (フォアグラウンド時の OS デフォルト表示は setNotificationHandler で抑制済み)
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const sub = Notifications.addNotificationReceivedListener(async (notif) => {
+      const data = notif?.request?.content?.data as any;
+      const groupId = data?.groupId;
+      if (!groupId) return;
+      try {
+        await notifee.displayNotification({
+          title: notif.request.content.title || '',
+          body: notif.request.content.body || '',
+          data,
+          android: {
+            channelId: 'default',
+            groupId: String(groupId),
+            smallIcon: 'ic_launcher',
+            pressAction: { id: 'default' },
+          },
+        });
+        await notifee.displayNotification({
+          id: `summary-${groupId}`,
+          title: data.groupTitle || 'NexPort',
+          body: '新着メッセージ',
+          android: {
+            channelId: 'default',
+            groupId: String(groupId),
+            groupSummary: true,
+            smallIcon: 'ic_launcher',
+            pressAction: { id: 'default' },
+          },
+        });
+      } catch (e) {
+        console.warn('Notifee grouping failed:', e);
+      }
+    });
+    return () => sub.remove();
+  }, []);
 
   // ネイティブ: realtimeで新着メッセージを監視、未読数を更新
   useEffect(() => {

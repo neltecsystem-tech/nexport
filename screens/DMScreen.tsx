@@ -90,6 +90,9 @@ export default function DMChatScreen({ onBack, partnerId, partnerName, currentUs
           user_ids: [partnerId],
           title: `💬 DM`,
           body: `${prof?.display_name ?? ''}: ${content.slice(0, 100)}`,
+          groupId: `dm-${currentUserId}`,
+          groupTitle: `💬 ${prof?.display_name ?? 'DM'}`,
+          type: 'dm',
         }),
       }).catch(() => {});
     } catch (_) {}

@@ -68,7 +68,12 @@ async function sendExpoPush(token: string, payloadObj: any) {
     to: token,
     title: payloadObj.title || 'NexPort',
     body: payloadObj.body || '',
-    data: { url: payloadObj.url || '/' },
+    data: {
+      url: payloadObj.url || '/',
+      groupId: payloadObj.groupId,
+      groupTitle: payloadObj.groupTitle,
+      type: payloadObj.type,
+    },
     sound: 'default',
     priority: 'high',
     channelId: 'default',
@@ -131,7 +136,7 @@ Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
   try {
-    const { action, user_id, subscription, title, body, url, user_ids } = await req.json();
+    const { action, user_id, subscription, title, body, url, user_ids, groupId, groupTitle, type } = await req.json();
     const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
       auth: { autoRefreshToken: false, persistSession: false }
     });
@@ -155,7 +160,7 @@ Deno.serve(async (req) => {
       if (!targetIds.length) throw new Error('user_id or user_ids required');
 
       const { data: subs } = await supabaseAdmin.from('push_subscriptions').select('*').in('user_id', targetIds);
-      const basePayload = { title: title || 'NexPort', body: body || '', url: url || '/', tag: 'nexport-' + Date.now() };
+      const basePayload = { title: title || 'NexPort', body: body || '', url: url || '/', tag: 'nexport-' + Date.now(), groupId, groupTitle, type };
 
       // 各ユーザーごとの未読数を事前取得（バッジ用）
       const unreadByUser: Record<string, number> = {};
