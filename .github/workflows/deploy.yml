@@ -22,20 +22,28 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build web assets
-        run: npx expo export --platform web --output-dir web-build
+      - name: Build web assets (Expo SDK 55 outputs to ./dist by default)
+        run: npx expo export --platform web
 
       - name: Copy service worker
-        run: cp web/sw.js web-build/sw.js
+        run: cp web/sw.js dist/sw.js
+
+      - name: Inject language/no-translate/no-cache meta into index.html
+        run: |
+          sed -i 's|<html lang="en">|<html lang="ja" translate="no">|' dist/index.html
+          sed -i 's|<title>NexPort</title>|<title translate="no">NexPort</title>|' dist/index.html
+          sed -i 's|\(<meta name="viewport"[^>]*>\)|\1\n    <meta name="google" content="notranslate" />\n    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />\n    <meta http-equiv="Pragma" content="no-cache" />\n    <meta http-equiv="Expires" content="0" />|' dist/index.html
 
       - name: Verify build output
-        run: ls -la web-build && find web-build | sort
+        run: ls -la dist && find dist -maxdepth 3 | sort
 
       - name: Deploy to Xserver via FTP
-        uses: SamKirkland/FTP-Deploy-Action@4.0.0
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ secrets.FTP_HOST }}
           username: ${{ secrets.FTP_USERNAME }}
           password: ${{ secrets.FTP_PASSWORD }}
           server-dir: ${{ secrets.FTP_PATH }}
-          local-dir: ./web-build/
+          local-dir: ./dist/
+          protocol: ftp
+          dangerous-clean-slate: false
