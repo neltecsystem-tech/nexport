@@ -201,6 +201,12 @@ export default function ChannelListScreen({ onSelectChannel, onShowMembers, onSh
 
   const fetchDmRooms = async () => {
     if (!currentUserId) return;
+    // ブロック中のユーザーをDM一覧から除外
+    const { data: blocks } = await supabase
+      .from('user_blocks')
+      .select('blocked_id')
+      .eq('blocker_id', currentUserId);
+    const blockedSet = new Set<string>((blocks || []).map((b: any) => b.blocked_id));
     const { data } = await supabase
       .from('direct_messages')
       .select('*')
@@ -210,6 +216,7 @@ export default function ChannelListScreen({ onSelectChannel, onShowMembers, onSh
     const roomMap: Record<string, { last_message: string; last_at: string; unread: number }> = {};
     data.forEach((dm: any) => {
       const partnerId = dm.sender_id === currentUserId ? dm.receiver_id : dm.sender_id;
+      if (blockedSet.has(partnerId)) return;
       if (!roomMap[partnerId]) {
         roomMap[partnerId] = { last_message: dm.content, last_at: dm.created_at, unread: 0 };
       }

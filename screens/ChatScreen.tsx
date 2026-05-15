@@ -5,7 +5,16 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '../lib/supabase';
-import { confirmDialog } from '../lib/platformHelpers';
+import { confirmDialog, alertDialog } from '../lib/platformHelpers';
+
+const REPORT_REASONS = [
+  '迷惑・スパム',
+  '嫌がらせ・誹謗中傷',
+  '不適切なコンテンツ',
+  '個人情報の漏洩',
+  '業務外の私的利用',
+  'その他',
+];
 
 type Message = {
   id: string;
@@ -65,6 +74,11 @@ export default function ChatScreen({ channelId, channelName, onBack, onOpenTabs,
   const [allProfiles, setAllProfiles] = useState<AllProfile[]>([]);
   const [selectedMsg, setSelectedMsg] = useState<Message | null>(null);
   const [msgMenuVisible, setMsgMenuVisible] = useState(false);
+  // 通報・ブロック
+  const [reportTargetMsg, setReportTargetMsg] = useState<Message | null>(null);
+  const [reportReason, setReportReason] = useState('');
+  const [reportDetail, setReportDetail] = useState('');
+  const [submittingReport, setSubmittingReport] = useState(false);
   const [unreadAnnouncements, setUnreadAnnouncements] = useState<Announcement[]>([]);
   const [annDetailVisible, setAnnDetailVisible] = useState(false);
   const [selectedAnn, setSelectedAnn] = useState<Announcement | null>(null);
@@ -572,6 +586,50 @@ export default function ChatScreen({ channelId, channelName, onBack, onOpenTabs,
     setMsgMenuVisible(true);
   };
 
+  const openReportForSelected = () => {
+    if (!selectedMsg) return;
+    setReportTargetMsg(selectedMsg);
+    setReportReason('');
+    setReportDetail('');
+    setMsgMenuVisible(false);
+  };
+
+  const blockSelectedSender = async () => {
+    if (!selectedMsg || !currentUserId) return;
+    const senderName = selectedMsg.profiles?.display_name ?? '送信者';
+    setMsgMenuVisible(false);
+    if (!(await confirmDialog(`${senderName} さんをブロックしますか？\n\n相手からのDMが届かなくなり、 一覧でも非表示になります。`))) return;
+    const { error } = await supabase
+      .from('user_blocks')
+      .insert({ blocker_id: currentUserId, blocked_id: selectedMsg.sender_id });
+    if (error) { alertDialog('エラー: ' + error.message); return; }
+    alertDialog('ブロックしました');
+  };
+
+  const submitChannelReport = async () => {
+    if (!reportTargetMsg || !currentUserId) return;
+    if (!reportReason) { alertDialog('通報理由を選択してください'); return; }
+    setSubmittingReport(true);
+    try {
+      const { error } = await supabase.from('message_reports').insert({
+        reporter_id: currentUserId,
+        message_type: 'channel',
+        message_id: reportTargetMsg.id,
+        channel_id: channelId,
+        reported_user_id: reportTargetMsg.sender_id,
+        reason: reportReason,
+        detail: reportDetail.trim() || null,
+      });
+      if (error) throw error;
+      alertDialog('通報を受け付けました。管理者が内容を確認します。');
+      setReportTargetMsg(null);
+    } catch (e: any) {
+      alertDialog('通報の送信に失敗しました: ' + (e?.message || String(e)));
+    } finally {
+      setSubmittingReport(false);
+    }
+  };
+
   const recallMessage = async () => {
     if (!selectedMsg) return;
     setMsgMenuVisible(false);
@@ -1066,6 +1124,16 @@ export default function ChatScreen({ channelId, channelName, onBack, onOpenTabs,
                 <Text style={styles.menuItemText}>↩️ 送信取り消し</Text>
               </TouchableOpacity>
             )}
+            {selectedMsg && selectedMsg.sender_id !== currentUserId && (
+              <>
+                <TouchableOpacity style={styles.menuItem} onPress={openReportForSelected}>
+                  <Text style={[styles.menuItemText, { color: '#B91C1C' }]}>⚠️ このメッセージを通報</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.menuItem} onPress={blockSelectedSender}>
+                  <Text style={[styles.menuItemText, { color: '#B91C1C' }]}>🚫 送信者をブロック</Text>
+                </TouchableOpacity>
+              </>
+            )}
             {isAdmin && (
               <TouchableOpacity style={styles.menuItem} onPress={deleteMessage}>
                 <Text style={[styles.menuItemText, { color: '#E24B4A' }]}>🗑 完全削除（管理者）</Text>
@@ -1076,6 +1144,56 @@ export default function ChatScreen({ channelId, channelName, onBack, onOpenTabs,
             </TouchableOpacity>
           </View>
         </TouchableOpacity>
+      </Modal>
+
+      {/* チャンネルメッセージ通報モーダル */}
+      <Modal visible={!!reportTargetMsg} transparent animationType="slide" onRequestClose={() => setReportTargetMsg(null)}>
+        <View style={styles.menuOverlay}>
+          <View style={[styles.menuContent, { maxHeight: '92%', width: '92%', maxWidth: 460 }]}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <Text style={styles.menuTitle}>メッセージを通報</Text>
+              <TouchableOpacity onPress={() => setReportTargetMsg(null)}>
+                <Text style={{ fontSize: 18, color: '#94A3B8' }}>✕</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={{ fontSize: 12, color: '#64748B', marginBottom: 10 }} numberOfLines={2}>
+              対象: {reportTargetMsg?.profiles?.display_name ?? ''} 「{reportTargetMsg?.content?.slice(0, 40)}」
+            </Text>
+            <Text style={{ fontSize: 13, fontWeight: '600', color: '#334155', marginBottom: 6 }}>理由 *</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+              {REPORT_REASONS.map(r => (
+                <TouchableOpacity
+                  key={r}
+                  style={{ paddingHorizontal: 12, paddingVertical: 8, borderRadius: 16, borderWidth: 1, borderColor: reportReason === r ? '#B91C1C' : '#CBD5E1', backgroundColor: reportReason === r ? '#B91C1C' : '#fff' }}
+                  onPress={() => setReportReason(r)}
+                >
+                  <Text style={{ fontSize: 12, color: reportReason === r ? '#fff' : '#475569' }}>{r}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <Text style={{ fontSize: 13, fontWeight: '600', color: '#334155', marginBottom: 6 }}>詳細 (任意)</Text>
+            <TextInput
+              style={{ borderWidth: 1, borderColor: '#CBD5E1', borderRadius: 8, padding: 10, fontSize: 13, minHeight: 80, textAlignVertical: 'top', backgroundColor: '#FAFAFA' }}
+              value={reportDetail}
+              onChangeText={setReportDetail}
+              multiline
+              placeholder="具体的な状況をご記入ください"
+              maxLength={500}
+            />
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
+              <TouchableOpacity style={{ flex: 1, borderRadius: 8, paddingVertical: 12, alignItems: 'center', backgroundColor: '#E2E8F0' }} onPress={() => setReportTargetMsg(null)} disabled={submittingReport}>
+                <Text style={{ color: '#475569', fontWeight: '600', fontSize: 13 }}>キャンセル</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={{ flex: 2, borderRadius: 8, paddingVertical: 12, alignItems: 'center', backgroundColor: '#B91C1C', opacity: submittingReport ? 0.6 : 1 }}
+                onPress={submitChannelReport}
+                disabled={submittingReport}
+              >
+                <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 13 }}>{submittingReport ? '送信中...' : '通報を送信'}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
       </Modal>
 
       {/* メンバー管理モーダル */}

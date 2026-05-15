@@ -6,7 +6,7 @@ import {
 import { supabase } from '../lib/supabase';
 import { confirmDialog } from '../lib/platformHelpers';
 
-type Tab = 'chat_logs' | 'dm_logs' | 'call_logs' | 'members' | 'pending' | 'admin_settings';
+type Tab = 'chat_logs' | 'dm_logs' | 'call_logs' | 'members' | 'pending' | 'reports' | 'admin_settings';
 
 type Message = {
   id: string;
@@ -169,14 +169,52 @@ export default function AdminScreen({ onBack, currentUserId, isSuperAdmin }: Pro
   const [callLogs, setCallLogs] = useState<any[]>([]);
   const [callLoading, setCallLoading] = useState(false);
 
+  // Reports (通報レビュー)
+  const [reportItems, setReportItems] = useState<any[]>([]);
+  const [reportsLoading, setReportsLoading] = useState(false);
+  const [reportsStatusFilter, setReportsStatusFilter] = useState<'pending' | 'all'>('pending');
+
   useEffect(() => {
     if (tab === 'chat_logs') { setPage(0); setMessages([]); fetchMessages(0); }
     if (tab === 'dm_logs') fetchDmLogs();
     if (tab === 'call_logs') fetchCallLogs();
     if (tab === 'members') fetchMembers();
     if (tab === 'pending') fetchPendingMembers();
+    if (tab === 'reports') fetchReports();
     if (tab === 'admin_settings') fetchAdminList();
-  }, [tab, selectedChannel, dateRange]);
+  }, [tab, selectedChannel, dateRange, reportsStatusFilter]);
+
+  const fetchReports = async () => {
+    setReportsLoading(true);
+    let q = supabase
+      .from('message_reports')
+      .select('*, reporter:profiles!message_reports_reporter_id_fkey(display_name), reported_user:profiles!message_reports_reported_user_id_fkey(display_name)')
+      .order('created_at', { ascending: false })
+      .limit(200);
+    if (reportsStatusFilter === 'pending') q = q.eq('status', 'pending');
+    const { data } = await q;
+    setReportItems(data || []);
+    setReportsLoading(false);
+  };
+
+  const resolveReport = async (reportId: string, action: 'resolved' | 'dismissed') => {
+    const { error } = await supabase
+      .from('message_reports')
+      .update({ status: action, resolved_by: currentUserId, resolved_at: new Date().toISOString() })
+      .eq('id', reportId);
+    if (error) { alert('更新失敗: ' + error.message); return; }
+    fetchReports();
+  };
+
+  const deleteReportedMessage = async (report: any) => {
+    if (!confirm(`このメッセージを完全削除します。よろしいですか？\n\n通報内容: ${report.reason}`)) return;
+    if (report.message_type === 'channel') {
+      await supabase.from('messages').update({ is_deleted: true, content: '🚫 管理者により削除されました' }).eq('id', report.message_id);
+    } else {
+      await supabase.from('direct_messages').delete().eq('id', report.message_id);
+    }
+    await resolveReport(report.id, 'resolved');
+  };
 
   const fetchDmLogs = async () => {
     setDmLoading(true);
@@ -625,6 +663,9 @@ export default function AdminScreen({ onBack, currentUserId, isSuperAdmin }: Pro
         <TouchableOpacity style={[styles.tab, tab === 'members' && styles.tabActive]} onPress={() => setTab('members')}>
           <Text style={[styles.tabText, tab === 'members' && styles.tabTextActive]}>👥 メンバー</Text>
         </TouchableOpacity>
+        <TouchableOpacity style={[styles.tab, tab === 'reports' && styles.tabActive]} onPress={() => setTab('reports')}>
+          <Text style={[styles.tabText, tab === 'reports' && styles.tabTextActive]}>⚠️ 通報</Text>
+        </TouchableOpacity>
         <TouchableOpacity style={[styles.tab, tab === 'pending' && styles.tabActive]} onPress={() => setTab('pending')}>
           <View style={styles.tabWithBadge}>
             <Text style={[styles.tabText, tab === 'pending' && styles.tabTextActive]}>⏳ 承認待ち</Text>
@@ -810,6 +851,82 @@ export default function AdminScreen({ onBack, currentUserId, isSuperAdmin }: Pro
               </View>
             )}
           />
+        </View>
+      )}
+
+      {/* 通報レビュータブ */}
+      {tab === 'reports' && (
+        <View style={{ flex: 1 }}>
+          <View style={{ flexDirection: 'row', padding: 8, gap: 6 }}>
+            <TouchableOpacity
+              style={{ paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14, backgroundColor: reportsStatusFilter === 'pending' ? '#B91C1C' : '#E2E8F0' }}
+              onPress={() => setReportsStatusFilter('pending')}
+            >
+              <Text style={{ fontSize: 12, color: reportsStatusFilter === 'pending' ? '#fff' : '#475569' }}>未対応のみ</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={{ paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14, backgroundColor: reportsStatusFilter === 'all' ? '#B91C1C' : '#E2E8F0' }}
+              onPress={() => setReportsStatusFilter('all')}
+            >
+              <Text style={{ fontSize: 12, color: reportsStatusFilter === 'all' ? '#fff' : '#475569' }}>すべて</Text>
+            </TouchableOpacity>
+            <Text style={{ marginLeft: 'auto', alignSelf: 'center', fontSize: 12, color: '#64748B' }}>{reportItems.length}件</Text>
+          </View>
+          {reportsLoading ? (
+            <Text style={{ padding: 20, color: '#94A3B8', textAlign: 'center' }}>読み込み中...</Text>
+          ) : reportItems.length === 0 ? (
+            <Text style={{ padding: 40, color: '#94A3B8', textAlign: 'center' }}>通報はありません</Text>
+          ) : (
+            <FlatList
+              data={reportItems}
+              keyExtractor={item => item.id}
+              contentContainerStyle={{ padding: 8, paddingBottom: 40 }}
+              renderItem={({ item }) => {
+                const statusColor = item.status === 'pending' ? '#B91C1C' : item.status === 'resolved' ? '#059669' : '#94A3B8';
+                return (
+                  <View style={{ backgroundColor: '#fff', borderRadius: 10, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: '#E2E8F0' }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                      <View style={{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10, backgroundColor: statusColor }}>
+                        <Text style={{ color: '#fff', fontSize: 10, fontWeight: '700' }}>{item.status}</Text>
+                      </View>
+                      <Text style={{ fontSize: 10, color: '#94A3B8' }}>{new Date(item.created_at).toLocaleString('ja-JP')}</Text>
+                    </View>
+                    <Text style={{ fontSize: 12, color: '#64748B', marginBottom: 2 }}>
+                      <Text style={{ fontWeight: '700', color: '#334155' }}>通報者:</Text> {item.reporter?.display_name ?? '?'} ／ <Text style={{ fontWeight: '700', color: '#334155' }}>対象ユーザー:</Text> {item.reported_user?.display_name ?? '?'}
+                    </Text>
+                    <Text style={{ fontSize: 12, color: '#64748B', marginBottom: 2 }}>
+                      <Text style={{ fontWeight: '700', color: '#334155' }}>種別:</Text> {item.message_type === 'channel' ? `チャンネル` : 'DM'}　<Text style={{ fontWeight: '700', color: '#334155' }}>理由:</Text> {item.reason}
+                    </Text>
+                    {item.detail && (
+                      <Text style={{ fontSize: 12, color: '#475569', marginVertical: 6, padding: 8, backgroundColor: '#F8FAFC', borderRadius: 6 }}>{item.detail}</Text>
+                    )}
+                    {item.status === 'pending' && (
+                      <View style={{ flexDirection: 'row', gap: 6, marginTop: 8 }}>
+                        <TouchableOpacity
+                          style={{ flex: 1, paddingVertical: 8, borderRadius: 6, backgroundColor: '#B91C1C', alignItems: 'center' }}
+                          onPress={() => deleteReportedMessage(item)}
+                        >
+                          <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>メッセージ削除+解決</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={{ flex: 1, paddingVertical: 8, borderRadius: 6, backgroundColor: '#059669', alignItems: 'center' }}
+                          onPress={() => resolveReport(item.id, 'resolved')}
+                        >
+                          <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>解決のみ</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={{ flex: 1, paddingVertical: 8, borderRadius: 6, backgroundColor: '#64748B', alignItems: 'center' }}
+                          onPress={() => resolveReport(item.id, 'dismissed')}
+                        >
+                          <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>却下</Text>
+                        </TouchableOpacity>
+                      </View>
+                    )}
+                  </View>
+                );
+              }}
+            />
+          )}
         </View>
       )}
 
