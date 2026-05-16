@@ -29,6 +29,7 @@ jobs:
         run: |
           cp web/sw.js dist/sw.js
           cp web/privacy.html dist/privacy.html
+          cp web/account-deletion.html dist/account-deletion.html
 
       - name: Inject language/no-translate/no-cache meta into index.html
         run: |
