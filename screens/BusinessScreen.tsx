@@ -5,6 +5,7 @@ import {
   Animated, Easing, Dimensions, Platform,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
 import { supabase } from '../lib/supabase';
 import { confirmDialog, alertDialog, nxStorageGet, nxStorageSet, injectStyleOnce, downloadBlob } from '../lib/platformHelpers';
@@ -12,9 +13,10 @@ import LayoutEditorScreen from './LayoutEditorScreen';
 import BusinessBalanceScreen from './BusinessBalanceScreen';
 import QuotationOrderScreen from './QuotationOrderScreen';
 import AreaMapScreen from './AreaMapScreen';
+import { SharedInvoicesView } from './SharedInvoicesView';
 
 // ─── Types ────────────────────────────────────────────────────
-type SubScreen = 'portal' | 'bulletin' | 'tasks' | 'attendance' | 'attend_admin' | 'attend_settings' | 'schedule' | 'reports' | 'gantt' | 'cards' | 'extlinks' | 'mail' | 'mypage' | 'vehicles' | 'interviews' | 'layout' | 'balance' | 'quotation' | 'fieldtools' | 'areamap';
+type SubScreen = 'portal' | 'bulletin' | 'tasks' | 'attendance' | 'attend_admin' | 'attend_settings' | 'schedule' | 'reports' | 'gantt' | 'cards' | 'extlinks' | 'mail' | 'mypage' | 'vehicles' | 'interviews' | 'layout' | 'balance' | 'quotation' | 'fieldtools' | 'areamap' | 'invoices';
 
 type Bookmark = {
   id: string;
@@ -272,6 +274,7 @@ const NAV_ITEMS: { key: SubScreen; icon: string; label: string; color: string }[
   { key: 'attendance', icon: '🕐', label: '勤怠管理',  color: '#F59E0B' },
   { key: 'schedule',   icon: '📅', label: '予定表',    color: '#8B5CF6' },
   { key: 'reports',    icon: '📝', label: '報告書',    color: '#EC4899' },
+  { key: 'invoices',   icon: '🧾', label: '共有請求書', color: '#D97706' },
   { key: 'quotation',  icon: '📋', label: '見積/発注',  color: '#9333EA' },
   { key: 'gantt',      icon: '📊', label: 'ガント',    color: '#0EA5E9' },
   { key: 'cards',      icon: '🪪', label: '名刺共有',  color: '#14B8A6' },
@@ -451,7 +454,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
 
   // ── Reports ───────────────────────────────────────────────
   const [reports,        setReports]        = useState<Report[]>([]);
-  const [reportFilter,   setReportFilter]   = useState<'mine' | 'draft' | 'all'>('mine');
+  const [reportFilter,   setReportFilter]   = useState<'mine' | 'draft' | 'all' | 'archive'>('mine');
   const [reportModal,    setReportModal]    = useState(false);
   const [editingReport,  setEditingReport]  = useState<Report | null>(null);
   const [viewReport,     setViewReport]     = useState<Report | null>(null);
@@ -475,6 +478,31 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   const [aiDraftLoading, setAiDraftLoading] = useState(false);
   const [aiDraftNotes,   setAiDraftNotes]   = useState('');
   const [reportNotifs,   setReportNotifs]   = useState<{ id: string; report_id: string; report_title: string; report_date: string; author_name: string }[]>([]);
+  // 過去資料 (報告書ツール導入前の社内資料アーカイブ)
+  type ReportArchive = {
+    id: string;
+    title: string;
+    document_date: string | null;
+    category: string | null;
+    content: string;
+    source_filename: string | null;
+    source_storage_path: string | null;
+    uploaded_by: string | null;
+    uploaded_at: string;
+    notes: string | null;
+  };
+  const [archives, setArchives] = useState<ReportArchive[]>([]);
+  const [loadingArchives, setLoadingArchives] = useState(false);
+  const [viewArchive, setViewArchive] = useState<ReportArchive | null>(null);
+  // 過去資料アップロード
+  const [archiveModal, setArchiveModal] = useState(false);
+  const [archiveFile, setArchiveFile] = useState<{ name: string; mime: string; bytes: Uint8Array } | null>(null);
+  const [archiveTitle, setArchiveTitle] = useState('');
+  const [archiveDocDate, setArchiveDocDate] = useState('');
+  const [archiveCategory, setArchiveCategory] = useState('');
+  const [archiveNotes, setArchiveNotes] = useState('');
+  const [archiveSaving, setArchiveSaving] = useState(false);
+  const [archiveProgress, setArchiveProgress] = useState('');
 
   // ── Mail ──────────────────────────────────────────────────
   const [mails, setMails] = useState<InternalMail[]>([]);
@@ -1602,7 +1630,104 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   };
 
   // ─── Reports ─────────────────────────────────────────────
-  useEffect(() => { if (screen === 'reports') { fetchReports(); fetchMembers(); fetchReportNotifs(); } }, [screen, reportFilter]);
+  useEffect(() => {
+    if (screen === 'reports') {
+      if (reportFilter === 'archive') { fetchArchives(); }
+      else { fetchReports(); }
+      fetchMembers();
+      fetchReportNotifs();
+    }
+  }, [screen, reportFilter]);
+
+  const fetchArchives = async () => {
+    setLoadingArchives(true);
+    const { data, error } = await supabase
+      .from('report_archives')
+      .select('*')
+      .order('document_date', { ascending: false, nullsFirst: false })
+      .order('uploaded_at', { ascending: false });
+    if (!error && data) setArchives(data as any);
+    setLoadingArchives(false);
+  };
+
+  const openArchiveUpload = () => {
+    setArchiveFile(null);
+    setArchiveTitle('');
+    setArchiveDocDate('');
+    setArchiveCategory('');
+    setArchiveNotes('');
+    setArchiveProgress('');
+    setArchiveModal(true);
+  };
+
+  const pickArchiveFile = async () => {
+    try {
+      const res = await DocumentPicker.getDocumentAsync({
+        type: ['application/pdf','application/vnd.openxmlformats-officedocument.wordprocessingml.document','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','application/msword','application/vnd.ms-excel','text/plain','text/csv'],
+        copyToCacheDirectory: true,
+      });
+      if (res.canceled) return;
+      const asset = res.assets[0];
+      const resp = await fetch(asset.uri);
+      const buf = await resp.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      const mime = asset.mimeType || 'application/octet-stream';
+      setArchiveFile({ name: asset.name, mime, bytes });
+      if (!archiveTitle) {
+        // ファイル名から拡張子除いてタイトル候補に
+        const base = asset.name.replace(/\.[^/.]+$/, '');
+        setArchiveTitle(base);
+      }
+    } catch (e: any) {
+      Alert.alert('エラー', 'ファイル選択に失敗しました: ' + e.message);
+    }
+  };
+
+  const uploadArchive = async () => {
+    if (!currentUserId) { Alert.alert('エラー', 'ログインが必要です'); return; }
+    if (!archiveFile) { Alert.alert('エラー', 'ファイルを選択してください'); return; }
+    if (!archiveTitle.trim()) { Alert.alert('エラー', 'タイトルを入力してください'); return; }
+    if (archiveFile.bytes.length > 18 * 1024 * 1024) {
+      Alert.alert('エラー', `ファイルが大きすぎます (${(archiveFile.bytes.length / 1024 / 1024).toFixed(1)}MB)。最大18MBまで対応。`);
+      return;
+    }
+    setArchiveSaving(true);
+    try {
+      // 1) Storage にアップロード
+      setArchiveProgress('📤 ファイルをアップロード中...');
+      const ts = Date.now();
+      const safeName = archiveFile.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const storagePath = `${currentUserId}/${ts}_${safeName}`;
+      const { error: upErr } = await supabase.storage
+        .from('report-archives')
+        .upload(storagePath, archiveFile.bytes, { contentType: archiveFile.mime });
+      if (upErr) throw new Error('アップロード失敗: ' + upErr.message);
+
+      // 2) EF でテキスト抽出 + DB保存
+      setArchiveProgress('🤖 AIがテキストを抽出中... (10〜30秒)');
+      const { data, error } = await supabase.functions.invoke('report-archive-ingest', {
+        body: {
+          storage_path: storagePath,
+          title: archiveTitle.trim(),
+          document_date: archiveDocDate.trim() || null,
+          category: archiveCategory.trim() || null,
+          notes: archiveNotes.trim() || null,
+          mime_type: archiveFile.mime,
+          original_filename: archiveFile.name,
+        },
+      });
+      if (error) throw new Error(error.message || 'EF呼び出し失敗');
+      if (data?.error) throw new Error(data.error);
+      setArchiveProgress(`✅ 完了 (${data?.content_length || 0}文字抽出)`);
+      setArchiveModal(false);
+      fetchArchives();
+    } catch (e: any) {
+      Alert.alert('エラー', e.message || String(e));
+      setArchiveProgress('');
+    } finally {
+      setArchiveSaving(false);
+    }
+  };
 
   const fetchReportNotifs = async () => {
     const { data } = await supabase
@@ -3724,6 +3849,13 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   }
 
   // ═══════════════════════════════════════════════════════════
+  // SHARED INVOICES (各アプリから集約された請求書)
+  // ═══════════════════════════════════════════════════════════
+  if (screen === 'invoices') {
+    return <SharedInvoicesView renderHeader={renderHeader} />;
+  }
+
+  // ═══════════════════════════════════════════════════════════
   // EXTERNAL LINKS
   // ═══════════════════════════════════════════════════════════
   if (screen === 'extlinks') {
@@ -4702,15 +4834,53 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
         )}
 
         {/* フィルタ */}
-        <View style={styles.rpFilterRow}>
-          {([['mine', '自分の報告書'], ['draft', '下書き'], ['all', '全報告書']] as [string, string][]).map(([k, l]) => (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rpFilterRow}>
+          {([['mine', '自分の報告書'], ['draft', '下書き'], ['all', '全報告書'], ['archive', '📚 過去資料']] as [string, string][]).map(([k, l]) => (
             <TouchableOpacity key={k} style={[styles.rpFilterChip, reportFilter === k && styles.rpFilterChipActive]} onPress={() => setReportFilter(k as any)}>
               <Text style={[styles.rpFilterChipText, reportFilter === k && styles.rpFilterChipTextActive]}>{l}</Text>
             </TouchableOpacity>
           ))}
-        </View>
+        </ScrollView>
 
-        {loadingReports ? <ActivityIndicator style={{ marginTop: 40 }} color="#EC4899" /> : (
+        {reportFilter === 'archive' ? (
+          <>
+            <View style={{ paddingHorizontal: 12, paddingTop: 8 }}>
+              <TouchableOpacity
+                style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#0EA5E9', borderRadius: 10, paddingVertical: 12 }}
+                onPress={openArchiveUpload}
+              >
+                <Text style={{ color: '#fff', fontSize: 14, fontWeight: 'bold' }}>＋ 過去資料をアップロード (PDF / Word / Excel / テキスト)</Text>
+              </TouchableOpacity>
+              <Text style={{ fontSize: 11, color: '#64748B', marginTop: 6, textAlign: 'center' }}>
+                ※ AIに食わせるため、本ツール導入前の議事録・契約書・提案書などを取り込めます (最大18MB)
+              </Text>
+            </View>
+            {loadingArchives ? <ActivityIndicator style={{ marginTop: 40 }} color="#0EA5E9" /> : (
+              <FlatList
+                data={archives}
+                keyExtractor={a => a.id}
+                contentContainerStyle={{ padding: 12, paddingBottom: 40 }}
+                ListEmptyComponent={<Text style={[styles.emptyText, { marginTop: 40 }]}>過去資料はまだありません</Text>}
+                renderItem={({ item: a }) => (
+                  <TouchableOpacity style={styles.rpCard} onPress={() => setViewArchive(a)}>
+                    <View style={styles.rpCardTop}>
+                      <View style={[styles.rpStatusBadge, { backgroundColor: '#E0F2FE' }]}>
+                        <Text style={[styles.rpStatusBadgeText, { color: '#0369A1' }]}>📚 過去資料</Text>
+                      </View>
+                      {a.category && <Text style={styles.rpCardCat}>{a.category}</Text>}
+                      <Text style={styles.rpCardDate}>{a.document_date || '日付不明'}</Text>
+                    </View>
+                    <Text style={styles.rpCardTitle} numberOfLines={1}>{a.title}</Text>
+                    <View style={styles.rpCardBottom}>
+                      {a.source_filename && <Text style={styles.rpCardAuthor}>{a.source_filename}</Text>}
+                      {a.content && <Text style={styles.rpCardPreview} numberOfLines={1}>{a.content.slice(0, 60)}</Text>}
+                    </View>
+                  </TouchableOpacity>
+                )}
+              />
+            )}
+          </>
+        ) : loadingReports ? <ActivityIndicator style={{ marginTop: 40 }} color="#EC4899" /> : (
           <FlatList
             data={reports}
             keyExtractor={r => r.id}
@@ -4952,6 +5122,119 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                   </TouchableOpacity>
                 </View>
               </ScrollView>
+            </View>
+          </View>
+        </Modal>
+
+        {/* 過去資料 アップロードモーダル */}
+        <Modal visible={archiveModal} transparent animationType="slide" onRequestClose={() => !archiveSaving && setArchiveModal(false)}>
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalSheet, { maxHeight: '92%' }]}>
+              <View style={styles.modalTop}>
+                <Text style={styles.modalTitle}>📚 過去資料をアップロード</Text>
+                <TouchableOpacity onPress={() => !archiveSaving && setArchiveModal(false)}><Text style={styles.modalClose}>✕</Text></TouchableOpacity>
+              </View>
+              <ScrollView>
+                <Text style={styles.fLabel}>ファイル *</Text>
+                <TouchableOpacity style={[styles.fInput, { paddingVertical: 14, alignItems: 'center', backgroundColor: archiveFile ? '#E0F2FE' : '#F1F5F9' }]} onPress={pickArchiveFile} disabled={archiveSaving}>
+                  <Text style={{ fontSize: 13, color: archiveFile ? '#0369A1' : '#64748B' }}>
+                    {archiveFile ? `📎 ${archiveFile.name} (${(archiveFile.bytes.length / 1024).toFixed(0)}KB)` : '📎 PDF / Word / Excel / テキストファイルを選択'}
+                  </Text>
+                </TouchableOpacity>
+
+                <Text style={styles.fLabel}>タイトル *</Text>
+                <TextInput style={styles.fInput} value={archiveTitle} onChangeText={setArchiveTitle} placeholder="例: 2024年事業計画書" editable={!archiveSaving} />
+
+                <Text style={styles.fLabel}>資料の日付 (YYYY-MM-DD、任意)</Text>
+                <TextInput style={styles.fInput} value={archiveDocDate} onChangeText={setArchiveDocDate} placeholder="例: 2024-04-01" editable={!archiveSaving} />
+
+                <Text style={styles.fLabel}>カテゴリ (任意)</Text>
+                <TextInput style={styles.fInput} value={archiveCategory} onChangeText={setArchiveCategory} placeholder="例: 議事録 / 契約書 / 提案書" editable={!archiveSaving} />
+
+                <Text style={styles.fLabel}>補足メモ (任意)</Text>
+                <TextInput style={[styles.fInput, { minHeight: 60, textAlignVertical: 'top' }]} value={archiveNotes} onChangeText={setArchiveNotes} placeholder="この資料の背景や注意点など" multiline editable={!archiveSaving} />
+
+                {archiveProgress ? (
+                  <View style={{ padding: 10, backgroundColor: '#F1F5F9', borderRadius: 6, marginTop: 8 }}>
+                    <Text style={{ fontSize: 13, color: '#475569' }}>{archiveProgress}</Text>
+                  </View>
+                ) : null}
+
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 16, marginBottom: 8 }}>
+                  <TouchableOpacity style={[styles.submitBtn, { flex: 1, backgroundColor: '#94A3B8' }]} onPress={() => !archiveSaving && setArchiveModal(false)} disabled={archiveSaving}>
+                    <Text style={styles.submitBtnText}>キャンセル</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.submitBtn, { flex: 1, backgroundColor: '#0EA5E9' }, archiveSaving && { opacity: 0.6 }]} onPress={uploadArchive} disabled={archiveSaving}>
+                    <Text style={styles.submitBtnText}>{archiveSaving ? '処理中...' : 'アップロード'}</Text>
+                  </TouchableOpacity>
+                </View>
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
+
+        {/* 過去資料 閲覧モーダル */}
+        <Modal visible={!!viewArchive} transparent animationType="slide" onRequestClose={() => setViewArchive(null)}>
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalSheet, { maxHeight: '92%' }]}>
+              <View style={styles.modalTop}>
+                <Text style={styles.modalTitle}>📚 過去資料</Text>
+                <TouchableOpacity onPress={() => setViewArchive(null)}><Text style={styles.modalClose}>✕</Text></TouchableOpacity>
+              </View>
+              {viewArchive && (
+                <ScrollView showsVerticalScrollIndicator={false}>
+                  <Text style={styles.rpViewTitle}>{viewArchive.title}</Text>
+                  <View style={styles.rpViewMeta}>
+                    <View style={styles.rpViewMetaRow}>
+                      <Text style={styles.rpViewMetaLabel}>資料日付</Text>
+                      <Text style={styles.rpViewMetaVal}>{viewArchive.document_date || '不明'}</Text>
+                    </View>
+                    {viewArchive.category ? (
+                      <View style={styles.rpViewMetaRow}>
+                        <Text style={styles.rpViewMetaLabel}>カテゴリ</Text>
+                        <Text style={styles.rpViewMetaVal}>{viewArchive.category}</Text>
+                      </View>
+                    ) : null}
+                    {viewArchive.source_filename ? (
+                      <View style={styles.rpViewMetaRow}>
+                        <Text style={styles.rpViewMetaLabel}>元ファイル</Text>
+                        <Text style={styles.rpViewMetaVal}>{viewArchive.source_filename}</Text>
+                      </View>
+                    ) : null}
+                    <View style={styles.rpViewMetaRow}>
+                      <Text style={styles.rpViewMetaLabel}>アップロード</Text>
+                      <Text style={styles.rpViewMetaVal}>{viewArchive.uploaded_at.slice(0, 10)}</Text>
+                    </View>
+                    {viewArchive.notes ? (
+                      <View style={styles.rpViewMetaRow}>
+                        <Text style={styles.rpViewMetaLabel}>補足</Text>
+                        <Text style={styles.rpViewMetaVal}>{viewArchive.notes}</Text>
+                      </View>
+                    ) : null}
+                  </View>
+                  <Text style={{ fontSize: 12, color: '#64748B', marginTop: 8, marginBottom: 4 }}>抽出テキスト ({viewArchive.content.length}文字)</Text>
+                  <View style={{ backgroundColor: '#F8FAFC', borderRadius: 6, padding: 10 }}>
+                    <Text style={{ fontSize: 13, color: '#1E293B', lineHeight: 20 }}>{viewArchive.content}</Text>
+                  </View>
+                  {viewArchive.uploaded_by === currentUserId && (
+                    <TouchableOpacity
+                      style={{ marginTop: 16, marginBottom: 8, paddingVertical: 10, backgroundColor: '#FEE2E2', borderRadius: 6, alignItems: 'center' }}
+                      onPress={async () => {
+                        const ok = await confirmDialog('過去資料を削除', `「${viewArchive.title}」を削除しますか？`);
+                        if (!ok) return;
+                        await supabase.from('report_archives').delete().eq('id', viewArchive.id);
+                        if (viewArchive.source_storage_path) {
+                          await supabase.storage.from('report-archives').remove([viewArchive.source_storage_path]);
+                        }
+                        setViewArchive(null);
+                        fetchArchives();
+                      }}
+                    >
+                      <Text style={{ color: '#DC2626', fontSize: 13, fontWeight: 'bold' }}>削除</Text>
+                    </TouchableOpacity>
+                  )}
+                </ScrollView>
+              )}
             </View>
           </View>
         </Modal>
@@ -5661,7 +5944,7 @@ const styles = StyleSheet.create({
   subHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 52, paddingBottom: 14, backgroundColor: '#1E3A5F' },
   subBack: { color: '#93C5FD', fontSize: 15, width: 64 },
   subHeaderTitle: { fontSize: 16, fontWeight: 'bold', color: '#fff' },
-  subHeaderRight: { width: 64, alignItems: 'flex-end' },
+  subHeaderRight: { minWidth: 64, alignItems: 'flex-end' },
   headerAddBtn: { backgroundColor: '#3B82F6', borderRadius: 14, paddingHorizontal: 12, paddingVertical: 5 },
   headerAddBtnText: { color: '#fff', fontSize: 13, fontWeight: 'bold' },
 
