@@ -10,6 +10,10 @@ const AUDIO_MIME_OK = new Set([
   'audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/m4a', 'audio/x-m4a',
   'audio/wav', 'audio/x-wav', 'audio/webm', 'audio/ogg', 'audio/aac', 'audio/flac',
 ]);
+const VIDEO_MIME_OK = new Set([
+  'video/mp4', 'video/quicktime', 'video/webm', 'video/x-msvideo',
+  'video/x-matroska', 'video/mpeg',
+]);
 
 async function bytesToBase64(bytes: Uint8Array): Promise<string> {
   const CHUNK = 0x8000;
@@ -132,20 +136,21 @@ Deno.serve(async (req: Request) => {
         status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
-    if (!AUDIO_MIME_OK.has(mimeType)) {
-      return new Response(JSON.stringify({ error: `Unsupported audio mime type: ${mimeType}` }), {
+    const isVideo = VIDEO_MIME_OK.has(mimeType);
+    if (!AUDIO_MIME_OK.has(mimeType) && !isVideo) {
+      return new Response(JSON.stringify({ error: `Unsupported mime type: ${mimeType}` }), {
         status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
 
     const admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-    // Download audio from storage
+    // Download from storage
     const { data: fileData, error: dlErr } = await admin.storage
       .from('meeting-audio')
       .download(storagePath);
     if (dlErr || !fileData) {
-      return new Response(JSON.stringify({ error: 'Failed to download audio: ' + (dlErr?.message || 'unknown') }), {
+      return new Response(JSON.stringify({ error: 'Failed to download file: ' + (dlErr?.message || 'unknown') }), {
         status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
@@ -166,8 +171,10 @@ Deno.serve(async (req: Request) => {
     // Build prompt
     const participantHint = participants ? `参加者リスト (発言者特定のヒント):\n${participants}` : '';
     const vocabHint = vocabHints ? `固有名詞ヒント (社内造語・社名・人名など、表記精度向上のため):\n${vocabHints}` : '';
+    const mediaLabel = isVideo ? '動画 (画面録画)' : '音声';
+    const videoExtraRule = isVideo ? `- 画面に表示されたスライド・グラフ・コード・ドキュメント等の視覚情報も拾い、議論内容に紐付けて記載する (例: 「画面: 売上推移グラフ表示」)\n- 画面共有された資料のタイトル・図表が読み取れる場合は記載する` : '';
     const prompt = `あなたは「ネルテック社の議事録作成アシスタント」です。
-添付の音声ファイルを文字起こしし、ビジネス文書としての議事録を作成してください。
+添付の${mediaLabel}ファイルを文字起こしし、ビジネス文書としての議事録を作成してください。
 
 == コンテキスト ==
 会議名: ${meetingName}
@@ -176,12 +183,13 @@ ${participantHint}
 ${vocabHint}
 
 == 厳守ルール ==
-- 音声の内容を忠実に拾い、雑談・休憩等の冗長部分は省略
+- ${mediaLabel}の内容を忠実に拾い、雑談・休憩等の冗長部分は省略
 - 数字・日付・固有名詞は正確に転記する (聞き取れない場合は【聞取困難】で明示)
 - 不明な部分は推測せず「【要確認】」で残す
 - 発言者が特定できる場合は「○○氏：」形式で発言を引用
 - 議題ごとに整理する
 - 日本語、簡潔なビジネス文書の言い回し
+${videoExtraRule}
 
 == 出力フォーマット ==
 以下の Markdown フォーマットで出力してください (タイトルや前置きは不要、本文のみ):

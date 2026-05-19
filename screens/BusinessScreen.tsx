@@ -1705,7 +1705,10 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   const pickMeetingAudio = async () => {
     try {
       const res = await DocumentPicker.getDocumentAsync({
-        type: ['audio/mpeg','audio/mp3','audio/mp4','audio/m4a','audio/x-m4a','audio/wav','audio/x-wav','audio/webm','audio/ogg','audio/aac','audio/flac'],
+        type: [
+          'audio/mpeg','audio/mp3','audio/mp4','audio/m4a','audio/x-m4a','audio/wav','audio/x-wav','audio/webm','audio/ogg','audio/aac','audio/flac',
+          'video/mp4','video/quicktime','video/webm','video/x-msvideo','video/x-matroska','video/mpeg',
+        ],
         copyToCacheDirectory: true,
       });
       if (res.canceled) return;
@@ -1716,6 +1719,15 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
       let mime = asset.mimeType || 'audio/mpeg';
       // Normalize common variants
       if (mime === 'audio/mp3') mime = 'audio/mpeg';
+      // Fallback MIME detection from extension if browser didn't provide
+      if (mime === 'application/octet-stream' || !mime) {
+        const ext = asset.name.toLowerCase().split('.').pop() || '';
+        const extMap: Record<string, string> = {
+          mp3: 'audio/mpeg', m4a: 'audio/m4a', wav: 'audio/wav', aac: 'audio/aac', flac: 'audio/flac', ogg: 'audio/ogg',
+          mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', avi: 'video/x-msvideo', mkv: 'video/x-matroska', mpeg: 'video/mpeg', mpg: 'video/mpeg',
+        };
+        if (extMap[ext]) mime = extMap[ext];
+      }
       setMeetingAudio({ name: asset.name, mime, bytes });
       if (!meetingName) {
         const base = asset.name.replace(/\.[^/.]+$/, '');
@@ -1728,14 +1740,27 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
 
   const submitMeetingAudio = async () => {
     if (!currentUserId) { Alert.alert('エラー', 'ログインが必要です'); return; }
-    if (!meetingAudio) { Alert.alert('エラー', '音声ファイルを選択してください'); return; }
-    if (meetingAudio.bytes.length > 100 * 1024 * 1024) {
-      Alert.alert('エラー', `ファイルが大きすぎます (${(meetingAudio.bytes.length / 1024 / 1024).toFixed(1)}MB)。最大100MBまで対応。`);
+    if (!meetingAudio) { Alert.alert('エラー', 'ファイルを選択してください'); return; }
+    const isVideo = meetingAudio.mime.startsWith('video/');
+    if (meetingAudio.bytes.length > 300 * 1024 * 1024) {
+      Alert.alert('エラー', `ファイルが大きすぎます (${(meetingAudio.bytes.length / 1024 / 1024).toFixed(1)}MB)。最大300MBまで対応。`);
       return;
+    }
+    // 動画ファイルはコスト約7倍なので確認ダイアログ
+    if (isVideo) {
+      const sizeMB = meetingAudio.bytes.length / 1024 / 1024;
+      // ざっくり: 1MB ≒ 30秒の動画 (圧縮率による)
+      const estMin = Math.max(1, Math.round(sizeMB / 2));
+      const estYen = Math.round(estMin * 2.5);  // 60分動画で約150円 ≒ 1分2.5円
+      const ok = await confirmDialog(
+        '動画ファイル処理の確認',
+        `動画ファイル (${sizeMB.toFixed(1)}MB) は音声のみより約7倍のコストがかかります。\n推定時間: ${estMin}分\n推定費用: 約${estYen}円\n\n音声のみで十分な会議の場合は、動画から音声を抽出してアップロードする方が経済的です。\n\n続行しますか？`
+      );
+      if (!ok) return;
     }
     setMeetingSaving(true);
     try {
-      setMeetingProgress('📤 音声ファイルをアップロード中...');
+      setMeetingProgress(`📤 ${isVideo ? '動画' : '音声'}ファイルをアップロード中...`);
       const ts = Date.now();
       const safeName = meetingAudio.name.replace(/[^a-zA-Z0-9._-]/g, '_');
       const storagePath = `${currentUserId}/${ts}_${safeName}`;
@@ -1746,7 +1771,8 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
 
       const sizeMB = meetingAudio.bytes.length / 1024 / 1024;
       const estMin = Math.ceil(sizeMB / 1.0); // 1MB ≒ 1min audio (rough)
-      setMeetingProgress(`🤖 AIが文字起こし＋議事録化中... (${sizeMB.toFixed(1)}MB / 推定${estMin * 30}〜${estMin * 60}秒)`);
+      const estSec = isVideo ? estMin * 60 : estMin * 30;
+      setMeetingProgress(`🤖 AIが${isVideo ? '動画解析＋' : ''}文字起こし＋議事録化中... (${sizeMB.toFixed(1)}MB / 推定${estSec}〜${estSec * 2}秒)`);
 
       const { data, error } = await supabase.functions.invoke('transcribe-meeting', {
         body: {
@@ -5232,15 +5258,23 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
               </View>
               <ScrollView>
                 <Text style={{ fontSize: 12, color: '#64748B', marginBottom: 10, padding: 8, backgroundColor: '#FEF3C7', borderRadius: 6 }}>
-                  会議の録音ファイル (mp3 / m4a / wav 等) をアップロードすると、AI が文字起こし＋議事録形式に整形して「下書き」として保存します。最大100MB / 約60〜90分の音声に対応。
+                  会議の録音/録画ファイル (音声: mp3 / m4a / wav, 動画: mp4 / mov / webm 等) をアップロードすると、AI が文字起こし＋議事録形式に整形して「下書き」として保存します。最大300MB / 約60〜120分。
+                  {'\n'}💡 動画は画面共有スライドも認識しますが、音声のみより約7倍の費用がかかります。
                 </Text>
 
-                <Text style={styles.fLabel}>音声ファイル *</Text>
-                <TouchableOpacity style={[styles.fInput, { paddingVertical: 14, alignItems: 'center', backgroundColor: meetingAudio ? '#FEE2E2' : '#F1F5F9' }]} onPress={pickMeetingAudio} disabled={meetingSaving}>
-                  <Text style={{ fontSize: 13, color: meetingAudio ? '#B91C1C' : '#64748B' }}>
-                    {meetingAudio ? `🎵 ${meetingAudio.name} (${(meetingAudio.bytes.length / 1024 / 1024).toFixed(1)}MB)` : '🎵 録音ファイルを選択 (mp3 / m4a / wav / webm 等)'}
+                <Text style={styles.fLabel}>音声 / 動画ファイル *</Text>
+                <TouchableOpacity style={[styles.fInput, { paddingVertical: 14, alignItems: 'center', backgroundColor: meetingAudio ? (meetingAudio.mime.startsWith('video/') ? '#FED7AA' : '#FEE2E2') : '#F1F5F9' }]} onPress={pickMeetingAudio} disabled={meetingSaving}>
+                  <Text style={{ fontSize: 13, color: meetingAudio ? (meetingAudio.mime.startsWith('video/') ? '#9A3412' : '#B91C1C') : '#64748B' }}>
+                    {meetingAudio
+                      ? `${meetingAudio.mime.startsWith('video/') ? '🎬' : '🎵'} ${meetingAudio.name} (${(meetingAudio.bytes.length / 1024 / 1024).toFixed(1)}MB)`
+                      : '🎵🎬 録音/録画ファイルを選択'}
                   </Text>
                 </TouchableOpacity>
+                {meetingAudio?.mime.startsWith('video/') && (
+                  <Text style={{ fontSize: 11, color: '#9A3412', marginTop: -4, marginBottom: 6, padding: 6, backgroundColor: '#FFEDD5', borderRadius: 4 }}>
+                    ⚠️ 動画ファイル選択中。画面共有内容も解析しますが、音声のみより費用が約7倍になります（60分動画で約150円）。音声のみで十分なら動画から音声を抽出してアップロードを推奨。
+                  </Text>
+                )}
 
                 <Text style={styles.fLabel}>会議名</Text>
                 <TextInput style={styles.fInput} value={meetingName} onChangeText={setMeetingName} placeholder="例: 5月度全社定例" editable={!meetingSaving} />
