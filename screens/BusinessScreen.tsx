@@ -14,9 +14,10 @@ import BusinessBalanceScreen from './BusinessBalanceScreen';
 import QuotationOrderScreen from './QuotationOrderScreen';
 import AreaMapScreen from './AreaMapScreen';
 import { SharedInvoicesView } from './SharedInvoicesView';
+import PortfolioScreen from './PortfolioScreen';
 
 // ─── Types ────────────────────────────────────────────────────
-type SubScreen = 'portal' | 'bulletin' | 'tasks' | 'attendance' | 'attend_admin' | 'attend_settings' | 'schedule' | 'reports' | 'gantt' | 'cards' | 'extlinks' | 'mail' | 'mypage' | 'vehicles' | 'interviews' | 'layout' | 'balance' | 'quotation' | 'fieldtools' | 'areamap' | 'invoices';
+type SubScreen = 'portal' | 'bulletin' | 'tasks' | 'attendance' | 'attend_admin' | 'attend_settings' | 'schedule' | 'reports' | 'gantt' | 'cards' | 'extlinks' | 'mail' | 'mypage' | 'vehicles' | 'interviews' | 'layout' | 'balance' | 'quotation' | 'fieldtools' | 'areamap' | 'invoices' | 'portfolio';
 
 type Bookmark = {
   id: string;
@@ -280,6 +281,7 @@ const NAV_ITEMS: { key: SubScreen; icon: string; label: string; color: string }[
   { key: 'cards',      icon: '🪪', label: '名刺共有',  color: '#14B8A6' },
   { key: 'vehicles',   icon: '🚗', label: '車両管理',  color: '#EF4444' },
   { key: 'interviews', icon: '👔', label: '面談シート', color: '#7C3AED' },
+  { key: 'portfolio',  icon: '📁', label: 'ポートフォリオ', color: '#0891B2' },
   { key: 'balance',    icon: '💰', label: '収支',       color: '#16A34A' },
   { key: 'layout',     icon: '📐', label: '倉庫レイアウト', color: '#059669' },
   { key: 'areamap',    icon: '🗾', label: 'エリア地図', color: '#0EA5E9' },
@@ -2316,6 +2318,13 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   // ═══════════════════════════════════════════════════════════
   if (screen === 'balance') {
     return <BusinessBalanceScreen onBack={() => setScreen('portal')} />;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // ポートフォリオ (人事評価)
+  // ═══════════════════════════════════════════════════════════
+  if (screen === 'portfolio') {
+    return <PortfolioScreen currentUserId={currentUserId} isAdmin={isAdmin} renderHeader={renderHeader} />;
   }
 
   // ═══════════════════════════════════════════════════════════
