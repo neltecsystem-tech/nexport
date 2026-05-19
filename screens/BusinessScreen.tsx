@@ -4990,7 +4990,7 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
         )}
 
         {/* フィルタ */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rpFilterRow}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.rpFilterRow} contentContainerStyle={{ gap: 6, alignItems: 'center' }}>
           {([['mine', '自分の報告書'], ['draft', '下書き'], ['all', '全報告書'], ['archive', '📚 過去資料']] as [string, string][]).map(([k, l]) => (
             <TouchableOpacity key={k} style={[styles.rpFilterChip, reportFilter === k && styles.rpFilterChipActive]} onPress={() => setReportFilter(k as any)}>
               <Text style={[styles.rpFilterChipText, reportFilter === k && styles.rpFilterChipTextActive]}>{l}</Text>
@@ -6426,7 +6426,7 @@ const styles = StyleSheet.create({
   ganttColorBtnActive: { borderColor: '#1E293B', borderWidth: 3 },
 
   // Reports
-  rpFilterRow: { flexDirection: 'row', gap: 6, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: '#FDF2F8', borderBottomWidth: 1, borderBottomColor: '#FBCFE8' },
+  rpFilterRow: { flexGrow: 0, flexShrink: 0, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: '#FDF2F8', borderBottomWidth: 1, borderBottomColor: '#FBCFE8' },
   rpFilterChip: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 16, backgroundColor: '#fff', borderWidth: 1, borderColor: '#FBCFE8' },
   rpFilterChipActive: { backgroundColor: '#EC4899', borderColor: '#EC4899' },
   rpFilterChipText: { fontSize: 12, fontWeight: '600', color: '#9D174D' },
