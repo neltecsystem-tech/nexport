@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal,
-  TextInput, ActivityIndicator, FlatList, Platform,
+  TextInput, ActivityIndicator, FlatList, Platform, Dimensions,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { confirmDialog, alertDialog } from '../lib/platformHelpers';
+import RadarChart from './RadarChart';
 
 type Props = {
   currentUserId: string;
@@ -14,7 +15,38 @@ type Props = {
 
 type Profile = { id: string; display_name: string; role?: string };
 
-type Tab = 'achievements' | 'skills';
+type Tab = 'achievements' | 'skills' | 'assessment';
+
+type Category = {
+  id: string;
+  label: string;
+  description: string | null;
+  sort_order: number;
+  is_default: boolean;
+  archived: boolean;
+};
+
+type Assessment = {
+  id: string;
+  user_id: string;
+  period_label: string;
+  self_completed_at: string | null;
+  manager_id: string | null;
+  manager_completed_at: string | null;
+  overall_comment: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type Score = {
+  id: string;
+  assessment_id: string;
+  category_id: string;
+  self_score: number | null;
+  manager_score: number | null;
+  self_note: string | null;
+  manager_note: string | null;
+};
 
 type Achievement = {
   id: string;
@@ -104,6 +136,16 @@ export default function PortfolioScreen({ currentUserId, isAdmin, renderHeader }
   const [createAchModal, setCreateAchModal] = useState(false);
   const [createSkillModal, setCreateSkillModal] = useState(false);
 
+  // ─ アセスメント状態 ─
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [assessments, setAssessments] = useState<Assessment[]>([]);
+  const [selectedAssessmentId, setSelectedAssessmentId] = useState<string | null>(null);
+  const [scores, setScores] = useState<Score[]>([]);
+  const [scoresLoading, setScoresLoading] = useState(false);
+  const [showNewAssessment, setShowNewAssessment] = useState(false);
+  const [showCategoryEditor, setShowCategoryEditor] = useState(false);
+  const [newAssessmentPeriod, setNewAssessmentPeriod] = useState('');
+
   const targetProfile = useMemo(() => members.find(m => m.id === targetUserId), [members, targetUserId]);
   const isViewingSelf = targetUserId === currentUserId;
   const canEditManagerFields = isAdmin && !isViewingSelf;
@@ -148,6 +190,98 @@ export default function PortfolioScreen({ currentUserId, isAdmin, renderHeader }
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
+  // ─ アセスメント: カテゴリ取得 ─
+  const fetchCategories = useCallback(async () => {
+    const { data } = await supabase.from('portfolio_assessment_categories')
+      .select('*').eq('archived', false).order('sort_order');
+    setCategories((data ?? []) as Category[]);
+  }, []);
+
+  // ─ アセスメント一覧取得 ─
+  const fetchAssessments = useCallback(async () => {
+    if (!targetUserId) return;
+    const { data } = await supabase.from('portfolio_assessments')
+      .select('*').eq('user_id', targetUserId).order('created_at', { ascending: false });
+    const list = (data ?? []) as Assessment[];
+    setAssessments(list);
+    setSelectedAssessmentId(prev => list.some(a => a.id === prev) ? prev : (list[0]?.id ?? null));
+  }, [targetUserId]);
+
+  // ─ スコア取得 ─
+  const fetchScores = useCallback(async (assessmentId: string | null) => {
+    if (!assessmentId) { setScores([]); return; }
+    setScoresLoading(true);
+    const { data } = await supabase.from('portfolio_assessment_scores')
+      .select('*').eq('assessment_id', assessmentId);
+    setScores((data ?? []) as Score[]);
+    setScoresLoading(false);
+  }, []);
+
+  useEffect(() => { if (tab === 'assessment') { fetchCategories(); fetchAssessments(); } }, [tab, fetchCategories, fetchAssessments]);
+  useEffect(() => { fetchScores(selectedAssessmentId); }, [selectedAssessmentId, fetchScores]);
+
+  // ─ 新規アセスメント作成 ─
+  const createAssessment = async () => {
+    const label = newAssessmentPeriod.trim();
+    if (!label) { alertDialog('期間名 (例: 2026上期) を入力してください'); return; }
+    const { data, error } = await supabase.from('portfolio_assessments')
+      .insert({ user_id: targetUserId, period_label: label })
+      .select().single();
+    if (error) { alertDialog('作成失敗: ' + error.message); return; }
+    setNewAssessmentPeriod('');
+    setShowNewAssessment(false);
+    await fetchAssessments();
+    setSelectedAssessmentId(data.id);
+  };
+
+  const deleteAssessment = async (id: string) => {
+    if (!await confirmDialog('このアセスメントを削除しますか?\n紐づくスコアもすべて削除されます')) return;
+    const { error } = await supabase.from('portfolio_assessments').delete().eq('id', id);
+    if (error) { alertDialog('削除失敗: ' + error.message); return; }
+    fetchAssessments();
+  };
+
+  // ─ スコア更新 (upsert) ─
+  const updateScore = async (
+    categoryId: string,
+    patch: Partial<Pick<Score, 'self_score' | 'manager_score' | 'self_note' | 'manager_note'>>,
+  ) => {
+    if (!selectedAssessmentId) return;
+    const existing = scores.find(s => s.category_id === categoryId);
+    if (existing) {
+      const { data, error } = await supabase.from('portfolio_assessment_scores')
+        .update(patch).eq('id', existing.id).select().single();
+      if (!error && data) setScores(prev => prev.map(s => s.id === data.id ? data as Score : s));
+    } else {
+      const { data, error } = await supabase.from('portfolio_assessment_scores')
+        .insert({ assessment_id: selectedAssessmentId, category_id: categoryId, ...patch })
+        .select().single();
+      if (!error && data) setScores(prev => [...prev, data as Score]);
+    }
+  };
+
+  const completeSelf = async () => {
+    if (!selectedAssessmentId) return;
+    const { error } = await supabase.from('portfolio_assessments')
+      .update({ self_completed_at: new Date().toISOString() })
+      .eq('id', selectedAssessmentId);
+    if (error) { alertDialog('更新失敗: ' + error.message); return; }
+    fetchAssessments();
+    alertDialog('自己評価を確定しました');
+  };
+
+  const completeManager = async () => {
+    if (!selectedAssessmentId) return;
+    const { error } = await supabase.from('portfolio_assessments')
+      .update({ manager_id: currentUserId, manager_completed_at: new Date().toISOString() })
+      .eq('id', selectedAssessmentId);
+    if (error) { alertDialog('更新失敗: ' + error.message); return; }
+    fetchAssessments();
+    alertDialog('上司評価を確定しました');
+  };
+
+  const selectedAssessment = assessments.find(a => a.id === selectedAssessmentId) ?? null;
+
   const deleteAch = async (id: string) => {
     if (!await confirmDialog('この成果を削除しますか?')) return;
     const { error } = await supabase.from('portfolio_achievements').delete().eq('id', id);
@@ -165,12 +299,26 @@ export default function PortfolioScreen({ currentUserId, isAdmin, renderHeader }
   };
 
   const headerAction = (
-    <TouchableOpacity
-      style={[styles.headerAddBtn, { backgroundColor: '#0891B2' }]}
-      onPress={() => tab === 'achievements' ? setCreateAchModal(true) : setCreateSkillModal(true)}
-    >
-      <Text style={styles.headerAddBtnText}>＋ 追加</Text>
-    </TouchableOpacity>
+    <View style={{ flexDirection: 'row', gap: 6 }}>
+      {tab === 'assessment' && isAdmin ? (
+        <TouchableOpacity
+          style={[styles.headerAddBtn, { backgroundColor: '#64748B' }]}
+          onPress={() => setShowCategoryEditor(true)}
+        >
+          <Text style={styles.headerAddBtnText}>⚙ 項目</Text>
+        </TouchableOpacity>
+      ) : null}
+      <TouchableOpacity
+        style={[styles.headerAddBtn, { backgroundColor: '#0891B2' }]}
+        onPress={() => {
+          if (tab === 'achievements') setCreateAchModal(true);
+          else if (tab === 'skills') setCreateSkillModal(true);
+          else setShowNewAssessment(true);
+        }}
+      >
+        <Text style={styles.headerAddBtnText}>＋ 追加</Text>
+      </TouchableOpacity>
+    </View>
   );
 
   return (
@@ -201,18 +349,40 @@ export default function PortfolioScreen({ currentUserId, isAdmin, renderHeader }
           style={[styles.tab, tab === 'achievements' && styles.tabActive]}
           onPress={() => setTab('achievements')}
         >
-          <Text style={[styles.tabText, tab === 'achievements' && styles.tabTextActive]}>🏆 成果・実績</Text>
+          <Text style={[styles.tabText, tab === 'achievements' && styles.tabTextActive]}>🏆 成果</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.tab, tab === 'skills' && styles.tabActive]}
           onPress={() => setTab('skills')}
         >
-          <Text style={[styles.tabText, tab === 'skills' && styles.tabTextActive]}>🎓 スキル・資格</Text>
+          <Text style={[styles.tabText, tab === 'skills' && styles.tabTextActive]}>🎓 スキル</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tab, tab === 'assessment' && styles.tabActive]}
+          onPress={() => setTab('assessment')}
+        >
+          <Text style={[styles.tabText, tab === 'assessment' && styles.tabTextActive]}>🧭 アセスメント</Text>
         </TouchableOpacity>
       </View>
 
-      {loading ? (
+      {loading && tab !== 'assessment' ? (
         <ActivityIndicator style={{ marginTop: 40 }} color="#0891B2" />
+      ) : tab === 'assessment' ? (
+        <AssessmentView
+          assessments={assessments}
+          selected={selectedAssessment}
+          selectedId={selectedAssessmentId}
+          onSelect={setSelectedAssessmentId}
+          categories={categories}
+          scores={scores}
+          scoresLoading={scoresLoading}
+          canEditSelf={isViewingSelf || isAdmin}
+          canEditManager={canEditManagerFields}
+          onUpdateScore={updateScore}
+          onCompleteSelf={completeSelf}
+          onCompleteManager={completeManager}
+          onDeleteAssessment={deleteAssessment}
+        />
       ) : tab === 'achievements' ? (
         <FlatList
           data={achievements}
@@ -349,6 +519,43 @@ export default function PortfolioScreen({ currentUserId, isAdmin, renderHeader }
         onClose={() => { setEditAch(null); setCreateAchModal(false); }}
         onSaved={() => { setEditAch(null); setCreateAchModal(false); fetchData(); }}
         onDelete={editAch ? () => deleteAch(editAch.id) : undefined}
+      />
+
+      {/* 新規アセスメント */}
+      <Modal visible={showNewAssessment} transparent animationType="slide" onRequestClose={() => setShowNewAssessment(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalSheet, { maxHeight: '50%' }]}>
+            <View style={styles.modalTop}>
+              <Text style={styles.modalTitle}>新規アセスメント</Text>
+              <TouchableOpacity onPress={() => setShowNewAssessment(false)}><Text style={styles.modalClose}>✕</Text></TouchableOpacity>
+            </View>
+            <Text style={styles.fLabel}>期間名 *</Text>
+            <TextInput
+              style={styles.fInput}
+              value={newAssessmentPeriod}
+              onChangeText={setNewAssessmentPeriod}
+              placeholder="例: 2026上期 / 2026Q2"
+              placeholderTextColor="#C0C0C0"
+            />
+            <Text style={{ fontSize: 11, color: '#94A3B8', marginTop: 6 }}>
+              同じ期間名で重複作成はできません。期間ごとに記録を残せます。
+            </Text>
+            <View style={styles.modalButtonsRow}>
+              <View style={{ flex: 1 }} />
+              <TouchableOpacity style={styles.saveBtn} onPress={createAssessment}>
+                <Text style={styles.saveBtnText}>作成</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* カテゴリ編集 (admin) */}
+      <CategoryEditor
+        visible={showCategoryEditor}
+        categories={categories}
+        onClose={() => setShowCategoryEditor(false)}
+        onChanged={fetchCategories}
       />
 
       {/* スキル 編集/作成モーダル */}
@@ -799,6 +1006,256 @@ function SkillEditor({
   );
 }
 
+// ─── Assessment View ───────────────────────────────────────────
+function AssessmentView({
+  assessments, selected, selectedId, onSelect, categories, scores, scoresLoading,
+  canEditSelf, canEditManager, onUpdateScore, onCompleteSelf, onCompleteManager, onDeleteAssessment,
+}: {
+  assessments: Assessment[];
+  selected: Assessment | null;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  categories: Category[];
+  scores: Score[];
+  scoresLoading: boolean;
+  canEditSelf: boolean;
+  canEditManager: boolean;
+  onUpdateScore: (categoryId: string, patch: Partial<Pick<Score, 'self_score' | 'manager_score' | 'self_note' | 'manager_note'>>) => Promise<void> | void;
+  onCompleteSelf: () => void;
+  onCompleteManager: () => void;
+  onDeleteAssessment: (id: string) => void;
+}) {
+  const scoreMap = useMemo(() => {
+    const m = new Map<string, Score>();
+    scores.forEach(s => m.set(s.category_id, s));
+    return m;
+  }, [scores]);
+
+  const chartSeries = useMemo(() => {
+    const selfVals = categories.map(c => scoreMap.get(c.id)?.self_score ?? 0);
+    const mgrVals = categories.map(c => scoreMap.get(c.id)?.manager_score ?? 0);
+    const series = [];
+    if (selfVals.some(v => v > 0)) {
+      series.push({ label: '自己評価', values: selfVals, color: '#F59E0B', fillOpacity: 0.25 });
+    }
+    if (mgrVals.some(v => v > 0)) {
+      series.push({ label: '上司評価', values: mgrVals, color: '#3B82F6', fillOpacity: 0.25 });
+    }
+    return series;
+  }, [categories, scoreMap]);
+
+  const fmt = (s: string | null) => s ? new Date(s).toLocaleDateString('ja-JP') : '未確定';
+
+  if (assessments.length === 0) {
+    return (
+      <View style={styles.empty}>
+        <Text style={styles.emptyIcon}>🧭</Text>
+        <Text style={styles.emptyTitle}>アセスメントがまだありません</Text>
+        <Text style={styles.emptyDesc}>右上の「＋ 追加」から期間ごとに作成できます</Text>
+      </View>
+    );
+  }
+
+  return (
+    <ScrollView contentContainerStyle={{ padding: 12, paddingBottom: 60 }}>
+      {/* 期間タブ */}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingBottom: 6 }}>
+        {assessments.map(a => (
+          <TouchableOpacity
+            key={a.id}
+            style={[styles.periodChip, selectedId === a.id && styles.periodChipActive]}
+            onPress={() => onSelect(a.id)}
+          >
+            <Text style={[styles.periodChipText, selectedId === a.id && styles.periodChipTextActive]}>
+              {a.period_label}
+            </Text>
+            {a.self_completed_at && a.manager_completed_at ? (
+              <Text style={{ fontSize: 10, color: selectedId === a.id ? '#fff' : '#94A3B8' }}>✓ 完了</Text>
+            ) : a.self_completed_at ? (
+              <Text style={{ fontSize: 10, color: selectedId === a.id ? '#fff' : '#94A3B8' }}>自己済</Text>
+            ) : null}
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
+
+      {!selected ? null : (
+        <>
+          {/* メタ情報 */}
+          <View style={styles.assessmentMeta}>
+            <Text style={styles.assessmentTitle}>{selected.period_label}</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginTop: 4 }}>
+              <Text style={styles.assessmentMetaText}>自己: {fmt(selected.self_completed_at)}</Text>
+              <Text style={styles.assessmentMetaText}>上司: {fmt(selected.manager_completed_at)}</Text>
+            </View>
+            <TouchableOpacity
+              style={{ position: 'absolute', top: 10, right: 10 }}
+              onPress={() => onDeleteAssessment(selected.id)}
+            >
+              <Text style={{ fontSize: 13, color: '#DC2626' }}>削除</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* レーダーチャート */}
+          {scoresLoading ? (
+            <ActivityIndicator style={{ marginVertical: 30 }} color="#0891B2" />
+          ) : chartSeries.length === 0 ? (
+            <View style={[styles.empty, { paddingTop: 30 }]}>
+              <Text style={styles.emptyIcon}>📊</Text>
+              <Text style={styles.emptyDesc}>下の各項目を1〜5で評価するとチャートが表示されます</Text>
+            </View>
+          ) : (
+            <View style={styles.chartCard}>
+              <RadarChart
+                axes={categories.map(c => c.label)}
+                series={chartSeries}
+                size={Math.min(340, Dimensions.get('window').width - 60)}
+              />
+            </View>
+          )}
+
+          {/* 各カテゴリの入力行 */}
+          <Text style={styles.sectionTitle}>📝 評価入力</Text>
+          {categories.map(c => {
+            const score = scoreMap.get(c.id);
+            return (
+              <View key={c.id} style={styles.scoreRow}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.scoreLabel}>{c.label}</Text>
+                    {c.description ? <Text style={styles.scoreDesc}>{c.description}</Text> : null}
+                  </View>
+                </View>
+                <View style={styles.scoreRatings}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.scoreSubLabel}>自己評価</Text>
+                    <StarRating
+                      value={score?.self_score ?? null}
+                      size={26}
+                      onChange={canEditSelf ? (v) => onUpdateScore(c.id, { self_score: v }) : undefined}
+                    />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.scoreSubLabel}>上司評価</Text>
+                    <StarRating
+                      value={score?.manager_score ?? null}
+                      size={26}
+                      color="#3B82F6"
+                      onChange={canEditManager ? (v) => onUpdateScore(c.id, { manager_score: v }) : undefined}
+                    />
+                  </View>
+                </View>
+              </View>
+            );
+          })}
+
+          {/* 確定ボタン */}
+          <View style={{ flexDirection: 'row', gap: 10, marginTop: 16 }}>
+            {canEditSelf && !selected.self_completed_at ? (
+              <TouchableOpacity style={[styles.saveBtn, { backgroundColor: '#F59E0B' }]} onPress={onCompleteSelf}>
+                <Text style={styles.saveBtnText}>自己評価を確定</Text>
+              </TouchableOpacity>
+            ) : null}
+            {canEditManager && !selected.manager_completed_at ? (
+              <TouchableOpacity style={[styles.saveBtn, { backgroundColor: '#3B82F6' }]} onPress={onCompleteManager}>
+                <Text style={styles.saveBtnText}>上司評価を確定</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        </>
+      )}
+    </ScrollView>
+  );
+}
+
+// ─── Category Editor (admin) ───────────────────────────────────
+function CategoryEditor({
+  visible, categories, onClose, onChanged,
+}: {
+  visible: boolean;
+  categories: Category[];
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [newLabel, setNewLabel] = useState('');
+  const [newDesc, setNewDesc] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const addCategory = async () => {
+    if (!newLabel.trim()) return;
+    setSaving(true);
+    const maxOrder = categories.reduce((m, c) => Math.max(m, c.sort_order), 0);
+    const { error } = await supabase.from('portfolio_assessment_categories').insert({
+      label: newLabel.trim(),
+      description: newDesc.trim() || null,
+      sort_order: maxOrder + 10,
+      is_default: false,
+    });
+    setSaving(false);
+    if (error) { alertDialog('追加失敗: ' + error.message); return; }
+    setNewLabel(''); setNewDesc('');
+    onChanged();
+  };
+
+  const removeCategory = async (c: Category) => {
+    if (!await confirmDialog(`「${c.label}」を削除しますか?\n紐づくスコアもすべて削除されます`)) return;
+    const { error } = await supabase.from('portfolio_assessment_categories').delete().eq('id', c.id);
+    if (error) { alertDialog('削除失敗: ' + error.message); return; }
+    onChanged();
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalSheet}>
+          <View style={styles.modalTop}>
+            <Text style={styles.modalTitle}>評価項目の管理</Text>
+            <TouchableOpacity onPress={onClose}><Text style={styles.modalClose}>✕</Text></TouchableOpacity>
+          </View>
+          <ScrollView showsVerticalScrollIndicator={false}>
+            {categories.map(c => (
+              <View key={c.id} style={styles.catRow}>
+                <View style={{ flex: 1 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Text style={styles.catLabel}>{c.label}</Text>
+                    {c.is_default ? <Text style={styles.catBadge}>標準</Text> : null}
+                  </View>
+                  {c.description ? <Text style={styles.catDesc}>{c.description}</Text> : null}
+                </View>
+                <TouchableOpacity onPress={() => removeCategory(c)}>
+                  <Text style={{ fontSize: 13, color: '#DC2626' }}>削除</Text>
+                </TouchableOpacity>
+              </View>
+            ))}
+
+            <Text style={[styles.fLabel, { marginTop: 18 }]}>新しい項目を追加</Text>
+            <TextInput
+              style={styles.fInput}
+              value={newLabel}
+              onChangeText={setNewLabel}
+              placeholder="項目名 (例: 顧客対応力)"
+              placeholderTextColor="#C0C0C0"
+            />
+            <TextInput
+              style={[styles.fInput, { marginTop: 8 }]}
+              value={newDesc}
+              onChangeText={setNewDesc}
+              placeholder="説明 (任意)"
+              placeholderTextColor="#C0C0C0"
+            />
+            <TouchableOpacity
+              style={[styles.saveBtn, { marginTop: 12, opacity: saving ? 0.6 : 1 }]}
+              disabled={saving}
+              onPress={addCategory}
+            >
+              <Text style={styles.saveBtnText}>{saving ? '追加中…' : '＋ 追加'}</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F8FAFC' },
   headerAddBtn: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16 },
@@ -878,4 +1335,28 @@ const styles = StyleSheet.create({
   deleteBtnText: { color: '#DC2626', fontWeight: '700', fontSize: 13 },
   saveBtn: { flex: 1, paddingVertical: 12, borderRadius: 8, backgroundColor: '#0891B2', alignItems: 'center' },
   saveBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
+
+  // アセスメント
+  periodChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 16, backgroundColor: '#F1F5F9' },
+  periodChipActive: { backgroundColor: '#0891B2' },
+  periodChipText: { fontSize: 13, fontWeight: '700', color: '#475569' },
+  periodChipTextActive: { color: '#fff' },
+
+  assessmentMeta: { backgroundColor: '#fff', borderRadius: 12, padding: 14, marginTop: 8, borderLeftWidth: 4, borderLeftColor: '#0891B2', shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 4, elevation: 2 },
+  assessmentTitle: { fontSize: 16, fontWeight: 'bold', color: '#1E293B' },
+  assessmentMetaText: { fontSize: 12, color: '#64748B' },
+
+  chartCard: { backgroundColor: '#fff', borderRadius: 12, padding: 14, marginTop: 12, alignItems: 'center', shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 4, elevation: 2 },
+
+  sectionTitle: { fontSize: 14, fontWeight: '700', color: '#1E293B', marginTop: 18, marginBottom: 8 },
+  scoreRow: { backgroundColor: '#fff', borderRadius: 10, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: '#F1F5F9' },
+  scoreLabel: { fontSize: 14, fontWeight: '700', color: '#1E293B' },
+  scoreDesc: { fontSize: 11, color: '#94A3B8', marginTop: 2 },
+  scoreRatings: { flexDirection: 'row', marginTop: 8, gap: 10 },
+  scoreSubLabel: { fontSize: 11, color: '#64748B', fontWeight: '600', marginBottom: 4 },
+
+  catRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#F1F5F9', gap: 8 },
+  catLabel: { fontSize: 14, fontWeight: '600', color: '#1E293B' },
+  catBadge: { fontSize: 10, color: '#0891B2', backgroundColor: '#ECFEFF', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, fontWeight: '700' },
+  catDesc: { fontSize: 11, color: '#94A3B8', marginTop: 2 },
 });
