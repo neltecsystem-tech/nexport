@@ -2208,9 +2208,43 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
       memo: evMemo.trim() || null, location: evLocation.trim() || null, all_day: !evStart,
     };
     if (editingEvent) {
-      // 編集時はstatus/assigned_byを維持
+      // 編集時: 既存レコードを update + 新規追加メンバーは INSERT
       const { error: updateErr } = await supabase.from('schedule_events').update({ ...base, user_id: evUserIds[0] }).eq('id', editingEvent.id);
       if (updateErr) { alert('予定の更新に失敗しました: ' + updateErr.message); setSavingEvent(false); return; }
+      // 追加メンバーがいれば新規 INSERT (元 user_id 以外で evUserIds[0] 以外)
+      const additionalUsers = evUserIds.slice(1).filter(uid => uid !== editingEvent.user_id);
+      if (additionalUsers.length > 0) {
+        const { error: insertErr } = await supabase.from('schedule_events').insert(additionalUsers.map(uid => ({ ...base, user_id: uid, status: uid === currentUserId ? 'accepted' : 'pending', assigned_by: currentUserId })));
+        if (insertErr) { alert('追加メンバーの保存に失敗しました: ' + insertErr.message); setSavingEvent(false); return; }
+        // 追加メンバーにメール・プッシュ通知
+        try {
+          const targetIds = additionalUsers.filter(uid => uid !== currentUserId);
+          if (targetIds.length > 0) {
+            const dateRange = evEndDate && evEndDate !== evDate ? `${evDate} 〜 ${evEndDate}` : evDate;
+            const timeStr = evStart ? `${evStart}${evEnd ? ' 〜 ' + evEnd : ''}` : '終日';
+            const html = `<div style="font-family:sans-serif;max-width:500px;margin:0 auto;">
+              <h2 style="color:#8B5CF6;">📅 予定のお知らせ</h2>
+              <div style="background:#FAF5FF;border:1px solid #E9D5FF;border-radius:10px;padding:16px;margin:12px 0;">
+                <p style="font-size:18px;font-weight:bold;margin:0 0 8px;">${base.title}</p>
+                <p style="margin:4px 0;color:#475569;">📆 ${dateRange}</p>
+                <p style="margin:4px 0;color:#475569;">🕐 ${timeStr}</p>
+                ${base.location ? `<p style="margin:4px 0;color:#475569;">📍 ${base.location}</p>` : ''}
+                <p style="margin:4px 0;color:#475569;">種別: ${base.event_type}</p>
+                ${base.memo ? `<p style="margin:8px 0;color:#334155;">${base.memo}</p>` : ''}
+              </div>
+              <p style="color:#64748B;font-size:13px;">👤 ${myName || '管理者'} さんからのアサインです。<br>NexPortにログインして承認・拒否してください。</p>
+            </div>`;
+            fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/send-email', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ user_ids: targetIds, email_subject: `【予定】${base.title} - ${dateRange}`, email_body: html })
+            }).catch(() => {});
+            fetch('https://nccognptoprhwsbjnwcu.supabase.co/functions/v1/web-push', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'send', user_ids: targetIds, title: '📅 予定のお知らせ', body: `${base.title} (${dateRange})` })
+            }).catch(() => {});
+          }
+        } catch (_) {}
+      }
     } else {
       const { error: insertErr } = await supabase.from('schedule_events').insert(evUserIds.map(uid => ({ ...base, user_id: uid, status: uid === currentUserId ? 'accepted' : 'pending', assigned_by: currentUserId })));
       if (insertErr) { alert('予定の保存に失敗しました: ' + insertErr.message); setSavingEvent(false); return; }
