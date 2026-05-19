@@ -503,6 +503,15 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
   const [archiveNotes, setArchiveNotes] = useState('');
   const [archiveSaving, setArchiveSaving] = useState(false);
   const [archiveProgress, setArchiveProgress] = useState('');
+  // 議事録AI (音声→文字起こし→議事録作成)
+  const [meetingModal, setMeetingModal] = useState(false);
+  const [meetingAudio, setMeetingAudio] = useState<{ name: string; mime: string; bytes: Uint8Array } | null>(null);
+  const [meetingName, setMeetingName] = useState('');
+  const [meetingDate, setMeetingDate] = useState('');
+  const [meetingParticipants, setMeetingParticipants] = useState('');
+  const [meetingVocab, setMeetingVocab] = useState('');
+  const [meetingSaving, setMeetingSaving] = useState(false);
+  const [meetingProgress, setMeetingProgress] = useState('');
 
   // ── Mail ──────────────────────────────────────────────────
   const [mails, setMails] = useState<InternalMail[]>([]);
@@ -1680,6 +1689,90 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
       }
     } catch (e: any) {
       Alert.alert('エラー', 'ファイル選択に失敗しました: ' + e.message);
+    }
+  };
+
+  const openMeetingModal = () => {
+    setMeetingAudio(null);
+    setMeetingName('');
+    setMeetingDate(dateStr(new Date()));
+    setMeetingParticipants('');
+    setMeetingVocab('');
+    setMeetingProgress('');
+    setMeetingModal(true);
+  };
+
+  const pickMeetingAudio = async () => {
+    try {
+      const res = await DocumentPicker.getDocumentAsync({
+        type: ['audio/mpeg','audio/mp3','audio/mp4','audio/m4a','audio/x-m4a','audio/wav','audio/x-wav','audio/webm','audio/ogg','audio/aac','audio/flac'],
+        copyToCacheDirectory: true,
+      });
+      if (res.canceled) return;
+      const asset = res.assets[0];
+      const resp = await fetch(asset.uri);
+      const buf = await resp.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let mime = asset.mimeType || 'audio/mpeg';
+      // Normalize common variants
+      if (mime === 'audio/mp3') mime = 'audio/mpeg';
+      setMeetingAudio({ name: asset.name, mime, bytes });
+      if (!meetingName) {
+        const base = asset.name.replace(/\.[^/.]+$/, '');
+        setMeetingName(base);
+      }
+    } catch (e: any) {
+      Alert.alert('エラー', 'ファイル選択に失敗しました: ' + e.message);
+    }
+  };
+
+  const submitMeetingAudio = async () => {
+    if (!currentUserId) { Alert.alert('エラー', 'ログインが必要です'); return; }
+    if (!meetingAudio) { Alert.alert('エラー', '音声ファイルを選択してください'); return; }
+    if (meetingAudio.bytes.length > 100 * 1024 * 1024) {
+      Alert.alert('エラー', `ファイルが大きすぎます (${(meetingAudio.bytes.length / 1024 / 1024).toFixed(1)}MB)。最大100MBまで対応。`);
+      return;
+    }
+    setMeetingSaving(true);
+    try {
+      setMeetingProgress('📤 音声ファイルをアップロード中...');
+      const ts = Date.now();
+      const safeName = meetingAudio.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const storagePath = `${currentUserId}/${ts}_${safeName}`;
+      const { error: upErr } = await supabase.storage
+        .from('meeting-audio')
+        .upload(storagePath, meetingAudio.bytes, { contentType: meetingAudio.mime });
+      if (upErr) throw new Error('アップロード失敗: ' + upErr.message);
+
+      const sizeMB = meetingAudio.bytes.length / 1024 / 1024;
+      const estMin = Math.ceil(sizeMB / 1.0); // 1MB ≒ 1min audio (rough)
+      setMeetingProgress(`🤖 AIが文字起こし＋議事録化中... (${sizeMB.toFixed(1)}MB / 推定${estMin * 30}〜${estMin * 60}秒)`);
+
+      const { data, error } = await supabase.functions.invoke('transcribe-meeting', {
+        body: {
+          storage_path: storagePath,
+          meeting_name: meetingName.trim() || '会議',
+          meeting_date: meetingDate.trim() || dateStr(new Date()),
+          participants: meetingParticipants.trim() || null,
+          vocab_hints: meetingVocab.trim() || null,
+          mime_type: meetingAudio.mime,
+          create_draft: true,
+        },
+      });
+      if (error) throw new Error(error.message || 'EF呼び出し失敗');
+      if (data?.error) throw new Error(data.error);
+
+      setMeetingProgress('✅ 完了！下書きを作成しました');
+      setMeetingModal(false);
+      // 下書きタブに切り替えて表示
+      setReportFilter('draft');
+      fetchReports();
+      Alert.alert('議事録作成完了', '下書きに保存しました。確認・編集してから提出してください。');
+    } catch (e: any) {
+      Alert.alert('エラー', e.message || String(e));
+      setMeetingProgress('');
+    } finally {
+      setMeetingSaving(false);
     }
   };
 
@@ -4810,6 +4903,9 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
       <View style={styles.container}>
         {renderHeader('📝 報告書',
           <View style={{ flexDirection: 'row', gap: 6 }}>
+            <TouchableOpacity style={[styles.headerAddBtn, { backgroundColor: '#F97316' }]} onPress={openMeetingModal}>
+              <Text style={styles.headerAddBtnText}>🎙️ 議事録AI</Text>
+            </TouchableOpacity>
             <TouchableOpacity style={[styles.headerAddBtn, { backgroundColor: '#8B5CF6' }]} onPress={() => { setAiQueryModal(true); setAiAnswer(''); setAiQuestion(''); }}>
               <Text style={styles.headerAddBtnText}>🤖 AIに聞く</Text>
             </TouchableOpacity>
@@ -5119,6 +5215,59 @@ export default function BusinessScreen({ onBack, currentUserId, isAdmin }: Props
                   </TouchableOpacity>
                   <TouchableOpacity style={[styles.submitBtn, { flex: 1, backgroundColor: '#EC4899' }, savingReport && { opacity: 0.6 }]} onPress={() => saveReport('提出済')} disabled={savingReport}>
                     <Text style={styles.submitBtnText}>提出</Text>
+                  </TouchableOpacity>
+                </View>
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
+
+        {/* 議事録AI モーダル (音声→文字起こし→議事録化→下書き作成) */}
+        <Modal visible={meetingModal} transparent animationType="slide" onRequestClose={() => !meetingSaving && setMeetingModal(false)}>
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalSheet, { maxHeight: '92%' }]}>
+              <View style={styles.modalTop}>
+                <Text style={styles.modalTitle}>🎙️ 議事録AI 作成</Text>
+                <TouchableOpacity onPress={() => !meetingSaving && setMeetingModal(false)}><Text style={styles.modalClose}>✕</Text></TouchableOpacity>
+              </View>
+              <ScrollView>
+                <Text style={{ fontSize: 12, color: '#64748B', marginBottom: 10, padding: 8, backgroundColor: '#FEF3C7', borderRadius: 6 }}>
+                  会議の録音ファイル (mp3 / m4a / wav 等) をアップロードすると、AI が文字起こし＋議事録形式に整形して「下書き」として保存します。最大100MB / 約60〜90分の音声に対応。
+                </Text>
+
+                <Text style={styles.fLabel}>音声ファイル *</Text>
+                <TouchableOpacity style={[styles.fInput, { paddingVertical: 14, alignItems: 'center', backgroundColor: meetingAudio ? '#FEE2E2' : '#F1F5F9' }]} onPress={pickMeetingAudio} disabled={meetingSaving}>
+                  <Text style={{ fontSize: 13, color: meetingAudio ? '#B91C1C' : '#64748B' }}>
+                    {meetingAudio ? `🎵 ${meetingAudio.name} (${(meetingAudio.bytes.length / 1024 / 1024).toFixed(1)}MB)` : '🎵 録音ファイルを選択 (mp3 / m4a / wav / webm 等)'}
+                  </Text>
+                </TouchableOpacity>
+
+                <Text style={styles.fLabel}>会議名</Text>
+                <TextInput style={styles.fInput} value={meetingName} onChangeText={setMeetingName} placeholder="例: 5月度全社定例" editable={!meetingSaving} />
+
+                <Text style={styles.fLabel}>開催日 (YYYY-MM-DD)</Text>
+                <TextInput style={styles.fInput} value={meetingDate} onChangeText={setMeetingDate} placeholder={dateStr(new Date())} editable={!meetingSaving} />
+
+                <Text style={styles.fLabel}>参加者 (任意・カンマ区切り)</Text>
+                <TextInput style={styles.fInput} value={meetingParticipants} onChangeText={setMeetingParticipants} placeholder="例: 山田, 鈴木, 佐藤" editable={!meetingSaving} />
+                <Text style={{ fontSize: 11, color: '#64748B', marginTop: -4, marginBottom: 6 }}>※ AI が発言者を特定する際のヒントになります</Text>
+
+                <Text style={styles.fLabel}>固有名詞ヒント (任意)</Text>
+                <TextInput style={[styles.fInput, { minHeight: 60, textAlignVertical: 'top' }]} value={meetingVocab} onChangeText={setMeetingVocab} placeholder="例: 荷主=ヤマト/SBS/アスクル, 営業所=城北/池袋/川崎, ネルテック上半期流行語大賞..." multiline editable={!meetingSaving} />
+                <Text style={{ fontSize: 11, color: '#64748B', marginTop: -4, marginBottom: 6 }}>※ 社内造語・固有名詞を書くと表記精度が上がります</Text>
+
+                {meetingProgress ? (
+                  <View style={{ padding: 10, backgroundColor: '#F1F5F9', borderRadius: 6, marginTop: 8 }}>
+                    <Text style={{ fontSize: 13, color: '#475569' }}>{meetingProgress}</Text>
+                  </View>
+                ) : null}
+
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 16, marginBottom: 8 }}>
+                  <TouchableOpacity style={[styles.submitBtn, { flex: 1, backgroundColor: '#94A3B8' }]} onPress={() => !meetingSaving && setMeetingModal(false)} disabled={meetingSaving}>
+                    <Text style={styles.submitBtnText}>キャンセル</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.submitBtn, { flex: 1, backgroundColor: '#F97316' }, meetingSaving && { opacity: 0.6 }]} onPress={submitMeetingAudio} disabled={meetingSaving}>
+                    <Text style={styles.submitBtnText}>{meetingSaving ? '処理中...' : '議事録作成'}</Text>
                   </TouchableOpacity>
                 </View>
               </ScrollView>
